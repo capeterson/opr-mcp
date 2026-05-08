@@ -14,7 +14,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import db
+from . import db, indexing_status
 from .ingest.pipeline import IngestStats, ingest_path
 
 log = logging.getLogger(__name__)
@@ -44,20 +44,21 @@ class _PdfHandler(FileSystemEventHandler):
 
     def _reingest(self) -> None:
         try:
-            conn = db.open_db()
-            try:
-                stats = ingest_path(conn, self._pdf_dir)
-                log.info(
-                    "Watch reingest of %s: %d new (+%d skipped), %d chunks, %d units, %d rules",
-                    self._pdf_dir,
-                    stats.documents,
-                    stats.skipped,
-                    stats.chunks,
-                    stats.units,
-                    stats.rules,
-                )
-            finally:
-                conn.close()
+            with indexing_status.track(f"watch reingest {self._pdf_dir}"):
+                conn = db.open_db()
+                try:
+                    stats = ingest_path(conn, self._pdf_dir)
+                    log.info(
+                        "Watch reingest of %s: %d new (+%d skipped), %d chunks, %d units, %d rules",
+                        self._pdf_dir,
+                        stats.documents,
+                        stats.skipped,
+                        stats.chunks,
+                        stats.units,
+                        stats.rules,
+                    )
+                finally:
+                    conn.close()
         except Exception:
             log.exception("Watch-triggered reingest failed")
 
@@ -82,22 +83,46 @@ class _PdfHandler(FileSystemEventHandler):
 
 
 def initial_ingest(pdf_dir: Path) -> IngestStats:
-    """Run a synchronous ingest pass over ``pdf_dir`` before the server starts."""
-    conn = db.open_db()
-    try:
-        stats = ingest_path(conn, pdf_dir)
-        log.info(
-            "Startup ingest of %s: %d new (+%d skipped), %d chunks, %d units, %d rules",
-            pdf_dir,
-            stats.documents,
-            stats.skipped,
-            stats.chunks,
-            stats.units,
-            stats.rules,
-        )
-        return stats
-    finally:
-        conn.close()
+    """Run a synchronous ingest pass over ``pdf_dir``."""
+    with indexing_status.track(f"startup ingest {pdf_dir}"):
+        conn = db.open_db()
+        try:
+            stats = ingest_path(conn, pdf_dir)
+            log.info(
+                "Startup ingest of %s: %d new (+%d skipped), %d chunks, %d units, %d rules",
+                pdf_dir,
+                stats.documents,
+                stats.skipped,
+                stats.chunks,
+                stats.units,
+                stats.rules,
+            )
+            return stats
+        finally:
+            conn.close()
+
+
+def start_initial_ingest_async(pdf_dir: Path) -> threading.Thread:
+    """Run the initial ingest in a daemon thread so the server can serve immediately.
+
+    The MCP server starts responding to tool calls right away. While the
+    background thread is still working, tool responses are wrapped with an
+    ``indexing`` status block warning that results may be partial. Once
+    the thread finishes (success or failure), ``initial_completed`` flips
+    so live reingests don't keep flagging "initial sweep pending".
+    """
+
+    def _run() -> None:
+        try:
+            initial_ingest(pdf_dir)
+        except Exception:
+            log.exception("Initial ingest of %s failed", pdf_dir)
+        finally:
+            indexing_status.mark_initial_completed()
+
+    t = threading.Thread(target=_run, name="opr-initial-ingest", daemon=True)
+    t.start()
+    return t
 
 
 def start_watcher(pdf_dir: Path, debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS) -> Observer:

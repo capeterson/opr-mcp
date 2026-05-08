@@ -118,6 +118,27 @@ Tools exposed:
 | `list_armies()` | Inventory of armies with counts |
 | `list_units(army)` | Roster for one army |
 | `list_documents()` | All ingested PDFs |
+| `index_status()` | Whether ingest is currently running and whether the initial sweep has completed |
+
+The MCP server stays online while the index is being built or refreshed.
+Startup ingest runs on a background thread, and PDF watcher reingests run on
+their own thread, so tools answer queries the whole time. While indexing is
+in progress (or before the initial sweep finishes), every tool response is
+wrapped with an ``indexing`` block:
+
+```json
+{
+  "results": [...],
+  "indexing": {
+    "in_progress": true,
+    "initial_completed": false,
+    "warning": "Initial indexing is in progress; results may be empty or incomplete until the first ingest finishes."
+  }
+}
+```
+
+When indexing is idle and complete, tools return their bare result the same
+way they always have.
 
 ## Configuration
 
