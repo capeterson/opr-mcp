@@ -190,6 +190,24 @@ def _load_sqlite_vec(conn: sqlite3.Connection) -> None:
 def connect(path: Path | None = None) -> sqlite3.Connection:
     p = path or db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
+    # sqlite3.connect creates the file on first use, but its "unable to open
+    # database file" error hides why (missing parent, path-is-a-directory,
+    # permission denied, etc.). Touch the file ourselves so an OSError surfaces
+    # the underlying cause, and so a fresh start always has a real file to open.
+    if not p.exists():
+        try:
+            p.touch()
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not create database file at {p}: {exc}. "
+                "Check that the path is not a directory and that the parent "
+                "directory is writable by the current user."
+            ) from exc
+    elif p.is_dir():
+        raise RuntimeError(
+            f"Database path {p} is a directory, not a file. "
+            "Set DB to a file path (e.g. /data/db/opr.db, not /data/db)."
+        )
     conn = sqlite3.connect(str(p))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
