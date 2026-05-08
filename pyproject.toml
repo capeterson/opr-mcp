@@ -16,6 +16,9 @@ dependencies = [
     "platformdirs>=4.0.0",
     "numpy>=1.26.0",
     "watchdog>=4.0.0",
+    "httpx>=0.27.0",
+    "uvicorn>=0.30.0",
+    "itsdangerous>=2.2.0",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +41,7 @@ packages = ["src/opr_mcp"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100

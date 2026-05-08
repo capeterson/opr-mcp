@@ -91,6 +91,61 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
 """
 
 
+AUTH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS oauth_clients (
+    client_id            TEXT PRIMARY KEY,
+    client_secret_hash   TEXT,
+    info_json            TEXT NOT NULL,
+    issued_at            INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_pending_authorizations (
+    id                   TEXT PRIMARY KEY,
+    client_id            TEXT NOT NULL,
+    redirect_uri         TEXT NOT NULL,
+    redirect_explicit    INTEGER NOT NULL,
+    code_challenge       TEXT NOT NULL,
+    scopes_json          TEXT NOT NULL,
+    state                TEXT,
+    resource             TEXT,
+    created_at           INTEGER NOT NULL,
+    expires_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_auth_codes (
+    code_hash            TEXT PRIMARY KEY,
+    client_id            TEXT NOT NULL,
+    redirect_uri         TEXT NOT NULL,
+    redirect_explicit    INTEGER NOT NULL,
+    code_challenge       TEXT NOT NULL,
+    scopes_json          TEXT NOT NULL,
+    discord_user_id      TEXT NOT NULL,
+    discord_username     TEXT,
+    resource             TEXT,
+    expires_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+    token_hash           TEXT PRIMARY KEY,
+    client_id            TEXT NOT NULL,
+    discord_user_id      TEXT NOT NULL,
+    scopes_json          TEXT NOT NULL,
+    resource             TEXT,
+    expires_at           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_access_tokens_client ON oauth_access_tokens(client_id);
+
+CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+    token_hash           TEXT PRIMARY KEY,
+    client_id            TEXT NOT NULL,
+    discord_user_id      TEXT NOT NULL,
+    scopes_json          TEXT NOT NULL,
+    expires_at           INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON oauth_refresh_tokens(client_id);
+"""
+
+
 class ExtensionLoadingError(RuntimeError):
     pass
 
@@ -139,3 +194,9 @@ def open_db(path: Path | None = None) -> sqlite3.Connection:
     conn = connect(path)
     init_schema(conn)
     return conn
+
+
+def init_auth_schema(conn: sqlite3.Connection) -> None:
+    """Idempotently create OAuth tables. Safe to call on existing DBs."""
+    conn.executescript(AUTH_SCHEMA)
+    conn.commit()

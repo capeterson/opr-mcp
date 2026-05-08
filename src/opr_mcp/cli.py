@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import typer
 
 from . import db, server
-from .config import configure_logging, db_path
+from .config import auth_enabled, configure_logging, db_path, http_host, http_port, load_auth_config
 from .ingest.pipeline import IngestStats, ingest_path
 
 log = logging.getLogger(__name__)
@@ -115,21 +116,58 @@ def serve(
         envvar="OPR_MCP_WATCH",
         help="After the startup ingest, watch --pdf-dir for changes and re-ingest automatically.",
     ),
+    transport: str = typer.Option(
+        "auto",
+        "--transport",
+        help="Transport: 'stdio', 'http' (streamable HTTP), or 'auto' (HTTP if OPR_MCP_AUTH_ENABLED, else stdio).",
+    ),
+    host: str | None = typer.Option(None, "--host", help="HTTP bind host (HTTP transport only)."),
+    port: int | None = typer.Option(None, "--port", help="HTTP bind port (HTTP transport only)."),
 ) -> None:
-    """Start the MCP server on stdio.
+    """Start the MCP server.
+
+    Defaults to stdio for local Claude Desktop. Set ``OPR_MCP_AUTH_ENABLED=true``
+    (and the related Discord env vars) to run as a remote OAuth-gated HTTP server.
 
     With ``--pdf-dir`` (or ``OPR_MCP_PDF_DIR``), every PDF under that directory is
     ingested before the server starts. Combine with ``--watch`` to keep the index
     in sync while the server runs — used by the Docker image.
     """
     configure_logging()
+    if transport not in {"auto", "stdio", "http"}:
+        raise typer.BadParameter("--transport must be one of: auto, stdio, http")
+
     if pdf_dir is not None:
         from .watch import initial_ingest, start_watcher
         pdf_dir.mkdir(parents=True, exist_ok=True)
         initial_ingest(pdf_dir)
         if watch:
             start_watcher(pdf_dir)
-    server.main()
+
+    if host is not None:
+        os.environ["OPR_MCP_HOST"] = host
+    if port is not None:
+        os.environ["OPR_MCP_PORT"] = str(port)
+
+    use_http = transport == "http" or (transport == "auto" and auth_enabled())
+
+    if not use_http:
+        log.info("Starting opr-mcp on stdio")
+        server.mcp.run()
+        return
+
+    cfg = load_auth_config() if auth_enabled() else None
+    if cfg is None:
+        log.warning("Running HTTP transport WITHOUT auth (OPR_MCP_AUTH_ENABLED is not true).")
+    else:
+        log.info(
+            "Starting opr-mcp on streamable-http at %s:%s (Discord auth enabled, guild=%s)",
+            http_host(),
+            http_port(),
+            cfg.discord_guild_id,
+        )
+    s = server.build_server(with_auth=cfg)
+    s.run(transport="streamable-http")
 
 
 def _print_summary(stats: IngestStats) -> None:
