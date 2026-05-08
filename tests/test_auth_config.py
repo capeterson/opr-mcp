@@ -8,12 +8,12 @@ from opr_mcp.config import ConfigError, load_auth_config
 
 def _set_required(monkeypatch, **overrides):
     base = {
-        "OPR_MCP_AUTH_ENABLED": "true",
-        "OPR_MCP_PUBLIC_URL": "https://opr.example.com",
-        "OPR_MCP_DISCORD_CLIENT_ID": "cid",
-        "OPR_MCP_DISCORD_CLIENT_SECRET": "csec",
-        "OPR_MCP_DISCORD_GUILD_ID": "G1",
-        "OPR_MCP_AUTH_SECRET": "secret-value-1234567890",
+        "AUTH_ENABLED": "true",
+        "PUBLIC_URL": "https://opr.example.com",
+        "DISCORD_CLIENT_ID": "cid",
+        "DISCORD_CLIENT_SECRET": "csec",
+        "DISCORD_GUILD_ID": "G1",
+        "AUTH_SECRET": "secret-value-1234567890",
     }
     base.update(overrides)
     for k, v in base.items():
@@ -27,12 +27,12 @@ def test_https_url_accepted(monkeypatch):
 
 
 def test_localhost_http_accepted(monkeypatch):
-    _set_required(monkeypatch, OPR_MCP_PUBLIC_URL="http://localhost:8765")
+    _set_required(monkeypatch, PUBLIC_URL="http://localhost:8765")
     assert load_auth_config().public_url == "http://localhost:8765"
 
 
 def test_loopback_http_accepted(monkeypatch):
-    _set_required(monkeypatch, OPR_MCP_PUBLIC_URL="http://127.0.0.1:8765")
+    _set_required(monkeypatch, PUBLIC_URL="http://127.0.0.1:8765")
     assert load_auth_config().public_url == "http://127.0.0.1:8765"
 
 
@@ -47,18 +47,18 @@ def test_loopback_http_accepted(monkeypatch):
     ],
 )
 def test_unacceptable_urls_rejected(monkeypatch, url):
-    _set_required(monkeypatch, OPR_MCP_PUBLIC_URL=url)
+    _set_required(monkeypatch, PUBLIC_URL=url)
     with pytest.raises(ConfigError):
         load_auth_config()
 
 
 def test_missing_discord_creds_rejected(monkeypatch):
-    _set_required(monkeypatch, OPR_MCP_DISCORD_CLIENT_SECRET="")
+    _set_required(monkeypatch, DISCORD_CLIENT_SECRET="")
     with pytest.raises(ConfigError):
         load_auth_config()
 
 
 def test_missing_public_url_rejected(monkeypatch):
-    _set_required(monkeypatch, OPR_MCP_PUBLIC_URL="")
+    _set_required(monkeypatch, PUBLIC_URL="")
     with pytest.raises(ConfigError):
         load_auth_config()

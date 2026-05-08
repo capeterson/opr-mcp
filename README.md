@@ -60,14 +60,14 @@ uv run opr-mcp forge-scan
 Background mode runs the same scan on an interval inside `serve`:
 
 ```bash
-OPR_MCP_PDF_DIR=/path/to/your/opr-pdfs \
-  uv run opr-mcp serve --watch --forge-sync
+PDF_DIR=/path/to/your/opr-pdfs \
+  uv run opr-mcp serve --forge-sync
 ```
 
-`--forge-sync` (or `OPR_MCP_FORGE_SYNC=1`) starts a daemon thread that scans
-every 12 hours by default and writes new/changed PDFs into
-`<OPR_MCP_PDF_DIR>/forge/`. Combined with `--watch`, the existing recursive
-watcher picks them up and feeds them through the normal ingest pipeline.
+`--forge-sync` (or `FORGE_SYNC=1`) starts a daemon thread that scans every
+12 hours by default and writes new/changed PDFs into `<PDF_DIR>/forge/`. The
+recursive watcher already running on `PDF_DIR` picks them up and feeds them
+through the normal ingest pipeline.
 
 How change detection works: the PDF URL embeds a rotating `renderId` nanoid
 that flips whenever a book is regenerated (`army-books/pdfs/<uid>~<gs>/<renderId>.pdf`).
@@ -76,20 +76,20 @@ the local `forge_books` table; only differing ones get downloaded.
 
 ### Forge env vars (all optional)
 
-- `OPR_MCP_FORGE_SYNC` — opt-in flag for the background scheduler in `serve`.
+- `FORGE_SYNC` — opt-in flag for the background scheduler in `serve`.
   Truthy values: `1`, `true`, `yes`, `on`. Default: off.
-- `OPR_MCP_FORGE_INTERVAL_SECONDS` — scheduler interval. Default: `43200`
+- `FORGE_INTERVAL_SECONDS` — scheduler interval. Default: `43200`
   (12 hours). Minimum: 60.
-- `OPR_MCP_FORGE_FILTERS` — `official`, `community`, or both
+- `FORGE_FILTERS` — `official`, `community`, or both
   (comma-separated). Default: `official`. The community catalog is large
   (thousands of books); enable it deliberately.
-- `OPR_MCP_FORGE_GAMES` — comma-separated game-system slugs or numeric IDs
+- `FORGE_GAMES` — comma-separated game-system slugs or numeric IDs
   to scan. Default: every known system (`ftl,gf,gff,aof,aofs,aofr,aofq,aofqai,gfsq,gfsqai`).
   A book contributes one PDF per game-system in its `enabledGameSystems`
   intersected with this list.
-- `OPR_MCP_FORGE_PDF_DIR` — explicit destination. Default precedence:
-  `<OPR_MCP_PDF_DIR>/forge` if `OPR_MCP_PDF_DIR` is set, otherwise a
-  `forge-pdfs` folder under the platform user data dir.
+- `FORGE_PDF_DIR` — explicit destination. Default precedence:
+  `<PDF_DIR>/forge` if `PDF_DIR` is set, otherwise a `forge-pdfs` folder
+  under the platform user data dir.
 
 ## Use with Claude
 
@@ -102,7 +102,7 @@ Add to your Claude Desktop / Claude Code MCP config:
       "command": "uv",
       "args": ["run", "opr-mcp", "serve"],
       "cwd": "/absolute/path/to/opr-mcp",
-      "env": { "OPR_MCP_DB": "/absolute/path/to/opr.db" }
+      "env": { "DB": "/absolute/path/to/opr.db" }
     }
   }
 }
@@ -123,17 +123,20 @@ Tools exposed:
 
 Environment variables (all optional):
 
-- `OPR_MCP_DB` — path to the SQLite file. Default: `%LOCALAPPDATA%\opr-mcp\opr.db`
+- `DB` — path to the SQLite file. Default: `%LOCALAPPDATA%\opr-mcp\opr.db`
   (Windows) or `~/.local/share/opr-mcp/opr.db` (Linux/macOS).
-- `OPR_MCP_EMBED_MODEL` — override the embedding model. Must be 384-dim or you
+- `EMBED_MODEL` — override the embedding model. Must be 384-dim or you
   will need to rebuild the DB.
-- `OPR_MCP_LOG_LEVEL` — `INFO` by default.
-- `OPR_MCP_PDF_DIR` — directory of PDFs ingested at startup (used by `serve`).
-- `OPR_MCP_WATCH` — when truthy and `OPR_MCP_PDF_DIR` is set, the server
-  re-ingests automatically when PDFs are added/changed/removed.
+- `EMBED_DEVICE` — torch device for the embedding model (`cpu`, `cuda`,
+  `mps`). Default: `cpu`.
+- `LOG_LEVEL` — `INFO` by default.
+- `PDF_DIR` — directory of PDFs ingested at startup and watched while the
+  server runs; the index is updated automatically when PDFs are added,
+  changed, or removed. The directory is created if it does not exist.
+  Default: `/pdf`.
 - Army Forge auto-fetch: see the
   [Auto-fetch from Army Forge](#auto-fetch-from-army-forge) section above for
-  `OPR_MCP_FORGE_*` variables.
+  `FORGE_*` variables.
 
 ## Docker
 
@@ -141,7 +144,7 @@ A prebuilt image is published to GHCR; `:dev` always tracks the latest build.
 
 ```bash
 docker run --rm -i \
-  -v /path/to/your/opr-pdfs:/data/pdfs:ro \
+  -v /path/to/your/opr-pdfs:/pdf \
   -v opr-mcp-db:/data/db \
   -v opr-mcp-hf:/data/hf-cache \
   ghcr.io/capeterson/opr-mcp:dev
@@ -149,31 +152,25 @@ docker run --rm -i \
 
 The container mounts:
 
-- `/data/pdfs` — your PDF corpus (read-only is fine). Indexed on startup and
-  re-indexed automatically on file changes.
-- `/data/forge-pdfs` — Army Forge auto-fetch destination. Only used when
-  `OPR_MCP_FORGE_SYNC=1`; must be writable in that case. Mount a named
-  volume (e.g. `-v opr-mcp-forge:/data/forge-pdfs`) so downloaded books
-  persist across restarts.
+- `/pdf` — your PDF corpus. Ingested on startup and re-ingested automatically
+  on file changes. Must be writable when `FORGE_SYNC=1`, since downloads land
+  in `/pdf/forge/`.
 - `/data/db` — SQLite index. Persist this volume to avoid re-ingesting.
 - `/data/hf-cache` — HuggingFace cache for the embedding model. Persist to
   avoid re-downloading the ~130 MB model on every container restart.
 
-The default `CMD` is `serve`, which honors `OPR_MCP_PDF_DIR=/data/pdfs`,
-`OPR_MCP_WATCH=1`, and `OPR_MCP_FORGE_PDF_DIR=/data/forge-pdfs` (all set in
-the image). To use it with Claude Desktop / Claude Code, point your MCP
-config at `docker run … ghcr.io/capeterson/opr-mcp:dev`.
+The default `CMD` is `serve`, which ingests `/pdf` on startup and watches it
+for changes while the server runs. To use it with Claude Desktop / Claude
+Code, point your MCP config at `docker run … ghcr.io/capeterson/opr-mcp:dev`.
 
-To turn on Army Forge auto-fetch in the container, add
-`-e OPR_MCP_FORGE_SYNC=1` and a writable forge-pdfs volume:
+To turn on Army Forge auto-fetch in the container, add `-e FORGE_SYNC=1`:
 
 ```bash
 docker run --rm -i \
-  -v /path/to/your/opr-pdfs:/data/pdfs:ro \
-  -v opr-mcp-forge:/data/forge-pdfs \
+  -v /path/to/your/opr-pdfs:/pdf \
   -v opr-mcp-db:/data/db \
   -v opr-mcp-hf:/data/hf-cache \
-  -e OPR_MCP_FORGE_SYNC=1 \
+  -e FORGE_SYNC=1 \
   ghcr.io/capeterson/opr-mcp:dev
 ```
 
@@ -195,17 +192,17 @@ server (per the MCP spec) and delegates user identity to Discord.
 ### 2. Set environment variables
 
 ```bash
-export OPR_MCP_AUTH_ENABLED=true
-export OPR_MCP_PUBLIC_URL="https://opr.example.com"   # how the world reaches you (https only, except for localhost)
-export OPR_MCP_DISCORD_CLIENT_ID="..."
-export OPR_MCP_DISCORD_CLIENT_SECRET="..."
-export OPR_MCP_DISCORD_GUILD_ID="123456789012345678"
-export OPR_MCP_AUTH_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export AUTH_ENABLED=true
+export PUBLIC_URL="https://opr.example.com"   # how the world reaches you (https only, except for localhost)
+export DISCORD_CLIENT_ID="..."
+export DISCORD_CLIENT_SECRET="..."
+export DISCORD_GUILD_ID="123456789012345678"
+export AUTH_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 # Optional:
-export OPR_MCP_HOST=0.0.0.0          # default 127.0.0.1
-export OPR_MCP_PORT=8765             # default 8765
-export OPR_MCP_AUTH_TOKEN_TTL=3600   # access token TTL (sec); default 1h
-export OPR_MCP_REFRESH_TOKEN_TTL=2592000   # refresh token TTL; default 30d
+export HOST=0.0.0.0          # default 127.0.0.1
+export PORT=8765             # default 8765
+export AUTH_TOKEN_TTL=3600   # access token TTL (sec); default 1h
+export REFRESH_TOKEN_TTL=2592000   # refresh token TTL; default 30d
 ```
 
 ### 3. Run the server
@@ -215,7 +212,7 @@ uv run opr-mcp serve --transport http
 ```
 
 Put a TLS-terminating reverse proxy (Caddy, nginx, Cloudflare) in front of it on
-`OPR_MCP_PUBLIC_URL` — Discord requires HTTPS for non-localhost redirect URIs.
+`PUBLIC_URL` — Discord requires HTTPS for non-localhost redirect URIs.
 
 ### 4. Connect a client
 
@@ -227,22 +224,22 @@ https://opr.example.com/.well-known/oauth-authorization-server
 
 MCP clients that support OAuth (with dynamic client registration) will discover
 the server and walk users through the Discord login. After Discord auth, the
-server checks `OPR_MCP_DISCORD_GUILD_ID` membership and either issues a bearer
+server checks `DISCORD_GUILD_ID` membership and either issues a bearer
 token or rejects with HTTP 403.
 
 Notes:
 
 - Tokens are stored as SHA-256 hashes; client secrets are encrypted at rest
-  with a key derived from `OPR_MCP_AUTH_SECRET` via Fernet.
+  with a key derived from `AUTH_SECRET` via Fernet.
 - Access and refresh tokens issued in the same exchange share a `grant_id`,
   so revoking either one removes both halves of the pair.
 - Guild membership is checked at token-issue time only. Token TTL bounds the
   revocation lag — to evict everyone immediately, lower
-  `OPR_MCP_AUTH_TOKEN_TTL`, or wipe both tables:
+  `AUTH_TOKEN_TTL`, or wipe both tables:
   `sqlite3 opr.db "DELETE FROM oauth_access_tokens; DELETE FROM oauth_refresh_tokens;"`.
   Deleting only the access-token table leaves refresh tokens able to mint
   fresh access tokens, so don't skip the second statement.
-- With `OPR_MCP_AUTH_ENABLED` unset, `serve` behaves exactly as before (stdio,
+- With `AUTH_ENABLED` unset, `serve` behaves exactly as before (stdio,
   no auth) — ideal for local Claude Desktop use.
 
 ## Tests

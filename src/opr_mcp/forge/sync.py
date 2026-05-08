@@ -362,7 +362,7 @@ def sync(
             # `database is locked` mid-scan.
             conn.commit()
 
-    # Prune only filters that actually returned books. If `OPR_MCP_FORGE_FILTERS`
+    # Prune only filters that actually returned books. If `FORGE_FILTERS`
     # is `official,community` and the community catalog transiently 500s back to
     # an empty list while official has data, we'd otherwise treat every
     # community row as stale.

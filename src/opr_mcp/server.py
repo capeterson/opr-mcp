@@ -4,7 +4,7 @@ Uses the FastMCP helper from the official mcp Python SDK. Supports two
 transports:
   * stdio (default) — for local Claude Desktop use, no auth.
   * streamable HTTP — for remote deployments, gated behind Discord OAuth
-    when ``OPR_MCP_AUTH_ENABLED=true``.
+    when ``AUTH_ENABLED=true``.
 """
 from __future__ import annotations
 
@@ -220,7 +220,7 @@ mcp = build_server()
 
 
 def main() -> None:
-    """Run the server on stdio (default) or HTTP if OPR_MCP_AUTH_ENABLED=true."""
+    """Run the server on stdio (default) or HTTP if AUTH_ENABLED=true."""
     configure_logging()
     if auth_enabled():
         cfg = load_auth_config()

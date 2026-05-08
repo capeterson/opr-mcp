@@ -16,8 +16,8 @@ def _model():
 
     name = embed_model_name()
     # Default to CPU. BGE-small is 33M params; embedding the OPR corpus on CPU
-    # takes seconds. Set OPR_MCP_EMBED_DEVICE=cuda (or mps) to override.
-    device = os.environ.get("OPR_MCP_EMBED_DEVICE", "cpu")
+    # takes seconds. Set EMBED_DEVICE=cuda (or mps) to override.
+    device = os.environ.get("EMBED_DEVICE", "cpu")
     model = SentenceTransformer(name, device=device)
     dim = model.get_sentence_embedding_dimension()
     if dim != EMBED_DIM:

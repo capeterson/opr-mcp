@@ -104,71 +104,56 @@ def stats() -> None:
 
 @app.command()
 def serve(
-    pdf_dir: Path | None = typer.Option(
-        None,
+    pdf_dir: Path = typer.Option(
+        Path("/pdf"),
         "--pdf-dir",
-        envvar="OPR_MCP_PDF_DIR",
-        help="Directory of PDFs to ingest on startup. Created if missing.",
-    ),
-    watch: bool = typer.Option(
-        False,
-        "--watch/--no-watch",
-        envvar="OPR_MCP_WATCH",
-        help="After the startup ingest, watch --pdf-dir for changes and re-ingest automatically.",
+        envvar="PDF_DIR",
+        help="Directory of PDFs to ingest on startup and watch for changes. Created if missing.",
     ),
     forge_sync: bool = typer.Option(
         False,
         "--forge-sync/--no-forge-sync",
-        envvar="OPR_MCP_FORGE_SYNC",
+        envvar="FORGE_SYNC",
         help="Periodically scan Army Forge for new/changed army-book PDFs and "
-             "drop them into <pdf-dir>/forge/. Interval is OPR_MCP_FORGE_INTERVAL_SECONDS "
+             "drop them into <pdf-dir>/forge/. Interval is FORGE_INTERVAL_SECONDS "
              "(default 12h).",
     ),
     transport: str = typer.Option(
         "auto",
         "--transport",
-        help="Transport: 'stdio', 'http' (streamable HTTP), or 'auto' (HTTP if OPR_MCP_AUTH_ENABLED, else stdio).",
+        help="Transport: 'stdio', 'http' (streamable HTTP), or 'auto' (HTTP if AUTH_ENABLED, else stdio).",
     ),
     host: str | None = typer.Option(None, "--host", help="HTTP bind host (HTTP transport only)."),
     port: int | None = typer.Option(None, "--port", help="HTTP bind port (HTTP transport only)."),
 ) -> None:
     """Start the MCP server.
 
-    Defaults to stdio for local Claude Desktop. Set ``OPR_MCP_AUTH_ENABLED=true``
+    Defaults to stdio for local Claude Desktop. Set ``AUTH_ENABLED=true``
     (and the related Discord env vars) to run as a remote OAuth-gated HTTP server.
 
-    With ``--pdf-dir`` (or ``OPR_MCP_PDF_DIR``), every PDF under that directory is
-    ingested before the server starts. Combine with ``--watch`` to keep the index
-    in sync while the server runs — used by the Docker image.
+    Every PDF under ``--pdf-dir`` (env ``PDF_DIR``, default ``/pdf``) is ingested
+    before the server starts, and the directory is watched for changes so the
+    index stays in sync while the server runs. The directory is created if it
+    does not exist.
 
-    With ``--forge-sync`` (or ``OPR_MCP_FORGE_SYNC=1``), a background scheduler
-    polls Army Forge on the configured interval, downloads any (book,
-    game-system) pair whose ``renderId`` has changed since the last scan, and
-    drops the PDFs into the watched directory so the ingest pipeline picks
-    them up.
+    With ``--forge-sync`` (or ``FORGE_SYNC=1``), a background scheduler polls
+    Army Forge on the configured interval, downloads any (book, game-system)
+    pair whose ``renderId`` has changed since the last scan, and drops the PDFs
+    into the watched directory so the ingest pipeline picks them up.
     """
     configure_logging()
     if transport not in {"auto", "stdio", "http"}:
         raise typer.BadParameter("--transport must be one of: auto, stdio, http")
-    if forge_sync and not watch:
-        raise typer.BadParameter(
-            "--forge-sync requires --watch (or OPR_MCP_WATCH=1): the scheduler "
-            "drops new PDFs into the corpus and the watcher is what feeds them "
-            "into the index. Without --watch, downloaded books would sit unused "
-            "until the next manual ingest."
-        )
-    watched: list[Path] = []
-    if pdf_dir is not None:
-        from .watch import initial_ingest, start_watcher
-        pdf_dir.mkdir(parents=True, exist_ok=True)
-        initial_ingest(pdf_dir)
-        if watch:
-            start_watcher(pdf_dir)
-        watched.append(pdf_dir.resolve())
+
+    from .watch import initial_ingest, start_watcher
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    initial_ingest(pdf_dir)
+    start_watcher(pdf_dir)
+    watched: list[Path] = [pdf_dir.resolve()]
+
     if forge_sync:
         from .forge import config as fcfg
         from .forge.scheduler import ForgeScheduler
-        from .watch import initial_ingest, start_watcher
         target = fcfg.pdf_dir(pdf_dir)
         target.mkdir(parents=True, exist_ok=True)
         # If the forge target isn't under an already-watched dir, watch it
@@ -191,9 +176,9 @@ def serve(
         scheduler.start()
 
     if host is not None:
-        os.environ["OPR_MCP_HOST"] = host
+        os.environ["HOST"] = host
     if port is not None:
-        os.environ["OPR_MCP_PORT"] = str(port)
+        os.environ["PORT"] = str(port)
 
     use_http = transport == "http" or (transport == "auto" and auth_enabled())
 
@@ -204,7 +189,7 @@ def serve(
 
     cfg = load_auth_config() if auth_enabled() else None
     if cfg is None:
-        log.warning("Running HTTP transport WITHOUT auth (OPR_MCP_AUTH_ENABLED is not true).")
+        log.warning("Running HTTP transport WITHOUT auth (AUTH_ENABLED is not true).")
     else:
         log.info(
             "Starting opr-mcp on streamable-http at %s:%s (Discord auth enabled, guild=%s)",
@@ -227,8 +212,8 @@ def _is_under(child: Path, parent: Path) -> bool:
 @app.command(name="forge-scan")
 def forge_scan(
     pdf_dir: Path | None = typer.Option(
-        None, "--pdf-dir", envvar="OPR_MCP_FORGE_PDF_DIR",
-        help="Where to download PDFs. Defaults to <OPR_MCP_PDF_DIR>/forge if "
+        None, "--pdf-dir", envvar="FORGE_PDF_DIR",
+        help="Where to download PDFs. Defaults to <PDF_DIR>/forge if "
              "that env var is set, else a 'forge-pdfs' folder under the user "
              "data dir.",
     ),
@@ -240,16 +225,16 @@ def forge_scan(
 ) -> None:
     """One-shot Army Forge scan: refresh the local PDF mirror.
 
-    Honors ``OPR_MCP_FORGE_FILTERS`` (default ``official``) and
-    ``OPR_MCP_FORGE_GAMES`` (default: every known game system). The scan
-    enumerates every ``(book, game_system)`` pair where the book is enabled
-    for that system and downloads the ones whose ``renderId`` differs from
-    what the DB last recorded.
+    Honors ``FORGE_FILTERS`` (default ``official``) and ``FORGE_GAMES``
+    (default: every known game system). The scan enumerates every
+    ``(book, game_system)`` pair where the book is enabled for that system
+    and downloads the ones whose ``renderId`` differs from what the DB last
+    recorded.
     """
     configure_logging()
     from .forge import config as fcfg
     from .forge import sync as fsync
-    serve_dir = Path(os.environ["OPR_MCP_PDF_DIR"]).expanduser() if os.environ.get("OPR_MCP_PDF_DIR") else None
+    serve_dir = Path(os.environ["PDF_DIR"]).expanduser() if os.environ.get("PDF_DIR") else None
     target = pdf_dir or fcfg.pdf_dir(serve_dir)
     target.mkdir(parents=True, exist_ok=True)
     conn = db.open_db()
