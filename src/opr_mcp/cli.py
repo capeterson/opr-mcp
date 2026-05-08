@@ -268,6 +268,9 @@ def forge_scan(
     if stats.failed:
         for name, err in stats.failed[:10]:
             typer.echo(f"  ! {name}: {err}")
+        # Non-zero exit so cron / CI can distinguish a partial mirror from a
+        # clean run and trigger a retry instead of moving on.
+        raise typer.Exit(code=1)
 
 
 def _print_summary(stats: IngestStats) -> None:

@@ -185,11 +185,20 @@ def _prune_stale(
         local_path = r["local_path"]
         if local_path:
             p = Path(local_path)
-            try:
-                if p.exists():
+            if p.exists():
+                try:
                     p.unlink()
-            except OSError as exc:
-                log.warning("forge: could not remove stale %s: %s", p, exc)
+                except OSError as exc:
+                    # Leave the row in place so the next scan retries; if we
+                    # dropped the DB cleanup now, the still-on-disk PDF would
+                    # get re-ingested as an unmanaged document on the next
+                    # watcher pass.
+                    log.warning(
+                        "forge: leaving %s mirrored — could not unlink stale "
+                        "PDF: %s. Will retry on the next scan.",
+                        p, exc,
+                    )
+                    continue
             _delete_ingested_document(conn, local_path)
         conn.execute(
             "DELETE FROM forge_books WHERE uid = ? AND game_system = ?", key,
@@ -220,7 +229,11 @@ def sync(
     filters = filters or ["official"]
     game_systems = game_systems or api.ALL_GAME_SYSTEM_IDS
     target_gs = set(game_systems)
+    # Resolve to absolute up front. The ingest pipeline records
+    # documents.path after path.resolve(), so prune's `WHERE path = ?` lookup
+    # only finds the matching row when forge_books.local_path is also absolute.
     pdf_dir.mkdir(parents=True, exist_ok=True)
+    pdf_dir = pdf_dir.resolve()
     stats = SyncStats()
     now = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
 
@@ -275,9 +288,19 @@ def sync(
 
             is_new = prev is None
             is_changed = (not is_new) and prev["render_id"] != render_id
-            needs_download = download and (is_new or is_changed or not local.exists())
+            would_download = is_new or is_changed or not local.exists()
 
-            if needs_download:
+            if would_download and not download:
+                # Dry-run: count what would change but don't persist the new
+                # render_id, or the next non-dry-run scan would think the
+                # book was already up-to-date and skip the actual download.
+                if is_new:
+                    stats.new += 1
+                else:
+                    stats.changed += 1
+                continue
+
+            if would_download:
                 try:
                     size = _http_download(r.url, local)
                 except Exception as exc:  # noqa: BLE001 — network errors vary

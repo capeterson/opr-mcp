@@ -53,6 +53,11 @@ def page_count(path: Path) -> int:
         return doc.page_count
 
 
+# `\bftl\b` rather than `"ftl" in lower` — substring search would match
+# unrelated words like "softly" or "swiftly" and misroute documents to
+# Warfleets.
+_FTL_TOKEN_RE = re.compile(r"\bftl\b")
+
 _BANNER_RE = re.compile(
     r"^\s*(?P<sys>AOFQAI|AOFQ|AOFR|AOFS|AOF|GFSQAI|GFSQ|GFS|GFF|FF|GF|FTL)"
     r"\s*-\s*(?P<army>[A-Z][A-Z' &]+?)\s*V[\d.]+\s*$",
@@ -103,7 +108,7 @@ def detect_metadata(path: Path, sample_pages: int = 3) -> dict:
 
     lower = text.lower()
     game_system = None
-    if "warfleets" in lower or "ftl" in lower:
+    if "warfleets" in lower or _FTL_TOKEN_RE.search(lower):
         game_system = "ftl"
     elif "grimdark future" in lower:
         game_system = "gf"

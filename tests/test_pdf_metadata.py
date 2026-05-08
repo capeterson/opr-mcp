@@ -44,3 +44,17 @@ def test_banner_does_not_match_truncated_prefix():
     m = _BANNER_RE.search("AOFQ - SOMETHING V1.0")
     assert m is not None
     assert m.group("sys") == "AOFQ"
+
+
+@pytest.mark.parametrize("text", ["softly", "swiftly", "uplifting", "shiftless"])
+def test_ftl_keyword_does_not_match_inside_unrelated_words(text):
+    """Substring `ftl` in words like 'softly'/'swiftly' must not trigger the
+    Warfleets game-system fallback."""
+    from opr_mcp.ingest.pdf import _FTL_TOKEN_RE
+    assert _FTL_TOKEN_RE.search(text) is None
+
+
+@pytest.mark.parametrize("text", ["ftl rules", "this is FTL".lower(), "warfleets ftl"])
+def test_ftl_keyword_matches_token(text):
+    from opr_mcp.ingest.pdf import _FTL_TOKEN_RE
+    assert _FTL_TOKEN_RE.search(text) is not None

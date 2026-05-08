@@ -132,12 +132,12 @@ def test_sync_no_download_mode_skips_writes(tmp_db, tmp_path):
     ):
         stats = sync.sync(conn, tmp_path, game_systems=[4], download=False)
 
-    # DB still recorded the row — change detection should run regardless.
+    # New book in dry-run: counted but NOT persisted, so the next normal scan
+    # still sees it as new and downloads it.
     row = conn.execute("SELECT render_id FROM forge_books WHERE uid='U1'").fetchone()
-    assert row is not None
-    # Without downloads we still classify the pair, but stats.unchanged is the right bucket
-    # because nothing was written and nothing was previously known.
+    assert row is None
     assert stats.seen == 1
+    assert stats.new == 1
 
 
 def test_sync_records_failed_downloads(tmp_db, tmp_path):
@@ -335,6 +335,105 @@ def test_prune_skipped_for_filter_with_empty_response(tmp_db, tmp_path):
 
     rows = {(r["uid"], r["official"]) for r in conn.execute("SELECT uid, official FROM forge_books")}
     assert rows == {("O", 1), ("C", 0)}
+
+
+def test_local_path_stored_as_absolute(tmp_db, tmp_path, monkeypatch):
+    """forge_books.local_path must be absolute so prune's path-based lookup
+    matches documents.path, which the ingest pipeline records via path.resolve().
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("U", "U", [4])
+    monkeypatch.chdir(tmp_path)
+
+    with (
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, Path("forge"), game_systems=[4])
+
+    row = conn.execute("SELECT local_path FROM forge_books WHERE uid='U'").fetchone()
+    assert Path(row["local_path"]).is_absolute()
+
+
+def test_no_download_does_not_advance_render_id(tmp_db, tmp_path):
+    """Dry-run must not record the new render_id, or the next normal scan
+    would think the book is already up-to-date and skip the actual download.
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("U", "U", [4])
+
+    with (
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g, "RID1")),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    with (
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g, "RID2")),
+        patch.object(sync, "_http_download", side_effect=AssertionError("must not be called")),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4], download=False, prune=False)
+    assert stats.changed == 1
+
+    row = conn.execute("SELECT render_id FROM forge_books WHERE uid='U'").fetchone()
+    assert row["render_id"] == "RID1"
+
+    # Subsequent normal scan with RID2 must actually download.
+    written: dict[Path, bytes] = {}
+    with (
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g, "RID2")),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written=written)),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+    assert stats.changed == 1
+    assert len(written) == 1
+    row = conn.execute("SELECT render_id FROM forge_books WHERE uid='U'").fetchone()
+    assert row["render_id"] == "RID2"
+
+
+def test_prune_keeps_rows_when_unlink_fails(tmp_db, tmp_path, monkeypatch):
+    """If we can't remove the stale PDF (file locked, RO mount, etc.), keep
+    the forge_books row so the next scan retries — otherwise the leftover PDF
+    gets re-ingested as an unmanaged document.
+    """
+    conn = db.open_db(tmp_db)
+    book_a = _book("A", "A", [4])
+    book_b = _book("B", "B", [4])
+
+    with (
+        patch.object(api, "list_books", return_value=[book_a, book_b]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    b_path_str = conn.execute(
+        "SELECT local_path FROM forge_books WHERE uid='B'"
+    ).fetchone()["local_path"]
+    real_unlink = Path.unlink
+
+    def selective_boom(self, *a, **kw):
+        if str(self) == b_path_str:
+            raise OSError("simulated lock")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", selective_boom)
+
+    with (
+        patch.object(api, "list_books", return_value=[book_a]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    rows = {r["uid"] for r in conn.execute("SELECT uid FROM forge_books").fetchall()}
+    assert rows == {"A", "B"}
+    assert stats.pruned == 0
+    assert Path(b_path_str).exists()
 
 
 def test_no_download_disables_pruning(tmp_db, tmp_path):
