@@ -145,9 +145,12 @@ def serve(
     if transport not in {"auto", "stdio", "http"}:
         raise typer.BadParameter("--transport must be one of: auto, stdio, http")
 
-    from .watch import initial_ingest, start_watcher
+    from .watch import start_initial_ingest_async, start_watcher
     pdf_dir.mkdir(parents=True, exist_ok=True)
-    initial_ingest(pdf_dir)
+    # Run initial ingest off-thread so the MCP server can start serving
+    # queries immediately. Tools attach an indexing-status warning to
+    # responses while the background pass is still running.
+    start_initial_ingest_async(pdf_dir)
     start_watcher(pdf_dir)
     watched: list[Path] = [pdf_dir.resolve()]
 
@@ -166,7 +169,7 @@ def serve(
             target_resolved == w or _is_under(target_resolved, w) for w in watched
         )
         if not already_watched:
-            initial_ingest(target)
+            start_initial_ingest_async(target)
             start_watcher(target)
             watched.append(target_resolved)
         allowed = fcfg.games()

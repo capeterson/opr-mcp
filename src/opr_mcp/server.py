@@ -13,7 +13,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from . import db
+from . import db, indexing_status
 from .config import (
     AuthConfig,
     auth_enabled,
@@ -39,6 +39,31 @@ def _db():
     if _conn is None:
         _conn = db.open_db()
     return _conn
+
+
+def _with_status(payload):
+    """Attach an indexing-status block to a tool result when ingest is active.
+
+    Returns the bare payload when the index is fully built and idle, so
+    clients see the same shape they always have. When indexing is in
+    progress (or hasn't completed an initial pass yet), wrap the payload
+    so the caller sees a ``warning`` and can decide whether to retry.
+    """
+    snap = indexing_status.snapshot()
+    warning = snap.warning()
+    if warning is None:
+        return payload
+    status = snap.to_dict()
+    status["warning"] = warning
+    if isinstance(payload, list):
+        return {"results": payload, "indexing": status}
+    if isinstance(payload, dict):
+        merged = dict(payload)
+        merged["indexing"] = status
+        return merged
+    if payload is None:
+        return {"result": None, "indexing": status}
+    return {"result": payload, "indexing": status}
 
 
 def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
@@ -90,7 +115,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         game_system: str | None = None,
         army: str | None = None,
         version: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> Any:
         """Free-text hybrid search across all ingested OPR rule chunks.
 
         Use this for questions about how a rule works, comparing rules, or finding
@@ -108,17 +133,17 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             version: Optional version pin (e.g. "3.5.3"). When omitted, only
                 the latest version of each (game_system, army) book is searched.
         """
-        return search_rules_tool.run(
+        return _with_status(search_rules_tool.run(
             _db(), query, limit=limit, game_system=game_system, army=army,
             version=version,
-        )
+        ))
 
     @mcp_obj.tool()
     def lookup_unit(
         name: str,
         army: str | None = None,
         version: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> Any:
         """Look up an OPR unit by name. Returns structured stats and equipment.
 
         Use this when the user names a specific unit and wants its profile. Returns
@@ -130,7 +155,9 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             version: Optional version pin (e.g. "3.5.3"). When omitted, only the
                 latest army-book version contributes results.
         """
-        return lookup_unit_tool.run(_db(), name, army=army, version=version)
+        return _with_status(
+            lookup_unit_tool.run(_db(), name, army=army, version=version)
+        )
 
     @mcp_obj.tool()
     def get_special_rule(
@@ -138,7 +165,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         scope: str | None = None,
         game_system: str | None = None,
         version: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> Any:
         """Look up a single special rule by exact name (case-insensitive).
 
         Strips parametric suffixes, so "Tough(3)" and "Tough" both resolve to the
@@ -152,17 +179,17 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             version: Optional version pin. When omitted, only the latest version
                 of each (game_system, army) source is searched.
         """
-        return get_special_rule_tool.run(
+        return _with_status(get_special_rule_tool.run(
             _db(), name, scope=scope, game_system=game_system, version=version,
-        )
+        ))
 
     @mcp_obj.tool()
-    def list_armies() -> list[dict[str, Any]]:
+    def list_armies() -> Any:
         """List every army present in the index, with document and unit counts."""
-        return lists_tool.list_armies(_db())
+        return _with_status(lists_tool.list_armies(_db()))
 
     @mcp_obj.tool()
-    def list_units(army: str, version: str | None = None) -> list[dict[str, Any]]:
+    def list_units(army: str, version: str | None = None) -> Any:
         """List all units for a given army (case-insensitive match on army name).
 
         Args:
@@ -170,12 +197,30 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             version: Optional version pin. When omitted, only units from the
                 latest army-book version are returned.
         """
-        return lists_tool.list_units(_db(), army, version=version)
+        return _with_status(lists_tool.list_units(_db(), army, version=version))
 
     @mcp_obj.tool()
-    def list_documents() -> list[dict[str, Any]]:
+    def list_documents() -> Any:
         """List every ingested PDF with its detected metadata."""
-        return lists_tool.list_documents(_db())
+        return _with_status(lists_tool.list_documents(_db()))
+
+    @mcp_obj.tool()
+    def index_status() -> dict[str, Any]:
+        """Report whether indexing is currently running.
+
+        Use this to check whether ``search_rules`` / ``lookup_unit`` /
+        ``get_special_rule`` are operating against a fully-built index.
+        Tool responses themselves attach an ``indexing`` block with the
+        same fields whenever indexing is not idle, so polling this tool
+        is only needed when callers want the status without running a
+        query.
+        """
+        snap = indexing_status.snapshot()
+        out = snap.to_dict()
+        warning = snap.warning()
+        if warning is not None:
+            out["warning"] = warning
+        return out
 
 
 def _register_discord_callback(mcp_obj: FastMCP) -> None:
