@@ -170,6 +170,75 @@ def test_parse_unit_skips_section_heading_as_rule():
     assert "options" not in rule_names_lower
 
 
+def test_parse_unit_upgrade_heading_is_a_hard_boundary():
+    """Option-row weapons after an 'Upgrades' heading must not become base equipment."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "Upgrades\n"
+        "Plasma Pistol (12\", A1, AP(2))\n"
+        "Power Sword (A2, AP(1))\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    # Only the base weapon — option rows must NOT appear.
+    assert eq_names == {"Rifle"}, eq_names
+
+
+def test_parse_unit_army_special_rules_heading_is_a_hard_boundary():
+    """'Army Special Rules' heading after a unit must not be stored as a rule."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "Army Special Rules\n"
+        "Bestial Boost\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_names_lower = {r.lower() for r in u.rules}
+    assert "army special rules" not in rule_names_lower
+    # ``Bestial Boost`` is past the boundary too — it belongs to the
+    # army-rules block, not this unit.
+    assert "bestial boost" not in rule_names_lower
+
+
+def test_parse_unit_suffixed_attack_marker():
+    """A weapon with 'A3x'-style attacks must be recognized as equipment."""
+    s = _section(
+        "Heavy Trooper [1] - 110pts\n"
+        "Quality 4+   Defense 4+\n"
+        "Heavy Cannon (24\", A3x, AP(1))\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Heavy Cannon" in eq_names, eq_names
+
+
+def test_parse_unit_strips_count_prefix_on_rule_tokens():
+    """Per-model count prefix on rules ('10x Furious') must be tolerated."""
+    s = _section(
+        "Squad [10] - 200pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "10x Furious, 10x Fast, Banner\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_names = set(u.rules)
+    assert {"Furious", "Fast", "Banner"}.issubset(rule_names), rule_names
+
+
 def test_parse_unit_inline_comma_joined_weapons():
     """Multiple weapons on a single comma-joined line."""
     s = _section(

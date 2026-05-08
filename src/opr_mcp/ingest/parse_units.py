@@ -45,28 +45,47 @@ _EQUIP_TOKEN_RE = re.compile(
     """,
     re.VERBOSE,
 )
-# A weapon's body always includes at least an attacks marker like ``A1``/``A2``.
-# Without this filter, parametric *rules* like ``Tough(3)`` masquerade as
-# weapons named "Tough".
-_WEAPON_ATTACKS_RE = re.compile(r"\bA\d+\b")
+# A weapon's body always includes at least an attacks marker like ``A1``/``A2``
+# (or the suffixed form ``A3x`` / ``A6x`` some army books use). Without this
+# filter, parametric *rules* like ``Tough(3)`` masquerade as weapons named
+# "Tough".
+_WEAPON_ATTACKS_RE = re.compile(r"\bA\d+x?\b")
 # Distinguishes equipment bodies (range, attacks, capitalized phrase) from
 # parametric-rule bodies (a bare number/short identifier like ``3`` or ``X``).
 # Used when accepting standalone non-attack equipment lines so we don't pick
 # up ``Tough(3)`` as defensive gear.
-_EQUIPMENT_BODY_RE = re.compile(r'\b(?:A\d+|\d+"|AP\(|Blast\(|[A-Z][a-z])')
-# Section headings that can appear right after a unit's profile in OPR army
-# books. Title-case so they slip past ``_RULE_TOKEN_RE`` if not filtered.
-_UNIT_SECTION_HEADINGS = frozenset({
+_EQUIPMENT_BODY_RE = re.compile(r'\b(?:A\d+x?|\d+"|AP\(|Blast\(|[A-Z][a-z])')
+# Section headings that mark the END of a unit's profile when the segmenter
+# fails to start a fresh section (PDF extraction sometimes glues an upgrade
+# table or army-wide rules block onto the unit's last block). Encountering
+# any of these terminates the equipment/rules scan for the current unit so
+# upgrade-option rows like ``Plasma Pistol (...)`` do not get stored as
+# base equipment, and ``Army Special Rules`` is not stored as a rule. The
+# set covers single-word headings and multi-word phrases — checked against
+# the line lower-cased and with a trailing colon stripped.
+_PROFILE_BOUNDARY_HEADINGS = frozenset({
+    # Single-word table/section starts after the unit profile.
     "upgrades", "options", "equipment", "weapons", "spells",
     "abilities", "characters", "rules", "special", "psychic",
     "items", "armory", "armoury", "wargear", "loadout",
+    # Multi-word section titles seen in real OPR army books.
+    "army special rules", "special rules", "psychic powers",
+    "spell list", "army wide special rule", "army-wide special rule",
 })
-# Rule token: ``Furious``, ``Tough(3)``, ``AP(2)``, ``Bestial Boost``. Used to
-# identify a bare comma-separated rules line on a unit card (no ``Rules:``
-# prefix, which real OPR army-book cards omit).
+# Rule token: ``Furious``, ``Tough(3)``, ``AP(2)``, ``Bestial Boost``, also
+# the count-prefixed form OPR uses for per-model rules like ``10x Furious``.
+# The optional ``Nx`` prefix is captured so the parser can strip it before
+# storing the rule.
+_RULE_COUNT_PREFIX_RE = re.compile(r"^\d+x\s+")
 _RULE_TOKEN_RE = re.compile(
     r"^[A-Z][A-Za-z' \-]{0,30}(?:\(\s*[A-Za-z0-9+]{1,8}\s*\))?$"
 )
+
+
+def _is_profile_boundary(line: str) -> bool:
+    """True if ``line`` is a heading that ends the unit's profile scan."""
+    norm = line.strip().lower().rstrip(":").rstrip()
+    return norm in _PROFILE_BOUNDARY_HEADINGS
 
 # Two glossary formats observed in real OPR PDFs:
 #
@@ -277,6 +296,13 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         if not s:
             continue
 
+        # Hard boundary: an upgrade table, ``Army Special Rules`` block, spell
+        # list, etc. that PDF extraction has glued onto this unit's section.
+        # Stop scanning so option-row weapons and section-heading rules
+        # don't pollute the unit profile.
+        if _is_profile_boundary(s):
+            break
+
         # Skip the name+stats lines so they don't get scanned for weapons/rules.
         if _UNIT_NAME_LINE_RE.match(s) or _QUALITY_DEF_RE.search(s):
             continue
@@ -311,11 +337,16 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         # never end up in rules_json.
         if _WEAPON_ATTACKS_RE.search(s):
             continue
-        tokens = [t.strip() for t in re.split(r"[,;]", s) if t.strip()]
-        # Drop section headings (``Upgrades``, ``Options``, etc.) that sit
-        # right after the unit profile and would otherwise pass the rule
-        # token regex.
-        tokens = [t for t in tokens if t.lower() not in _UNIT_SECTION_HEADINGS]
+        # Strip any per-model count prefix (``10x Furious`` -> ``Furious``)
+        # before validating. The strip-then-sub order matters: the count
+        # regex anchors at the start of the token, so leading whitespace
+        # from the comma split would otherwise hide it. OPR army books use
+        # the count form for per-model rules like ``10x Furious, 10x Fast``.
+        tokens = [
+            _RULE_COUNT_PREFIX_RE.sub("", t.strip())
+            for t in re.split(r"[,;]", s)
+        ]
+        tokens = [t for t in tokens if t]
         if not tokens or not all(_RULE_TOKEN_RE.match(t) for t in tokens):
             continue
         # A single non-parametric token (lone ``Hero``) only counts once we
