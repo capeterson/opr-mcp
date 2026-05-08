@@ -329,6 +329,76 @@ def test_parse_unit_keeps_lone_rule_before_equipment():
     assert {"CCW"}.issubset({e["name"] for e in u.equipment})
 
 
+def test_parse_unit_does_not_classify_unit_title_line_as_rule():
+    """A plain-title unit name line ('Battle Brothers') must not become a rule."""
+    s = _section(
+        "Battle Brothers\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3), Furious\n",
+        title="Battle Brothers",
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Battle Brothers" not in u.rules
+    assert {"Tough(3)", "Furious"}.issubset(set(u.rules))
+
+
+def test_parse_unit_skips_pre_profile_flavor_text():
+    """Title Case flavor lines BEFORE the stat line must not become rules."""
+    s = _section(
+        "Veteran Warriors\n"
+        "Battle Brothers [5] - 90pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Veteran Warriors" not in u.rules
+
+
+def test_parse_unit_keeps_named_gear_with_rule_descriptor():
+    """``Stealth Cloak (Stealth)``-style gear stays in equipment, not rules."""
+    s = _section(
+        "Scout [1] - 70pts\n"
+        "Quality 4+   Defense 4+\n"
+        "Stealth Cloak (Stealth)\n"
+        "Banner (Fear(1))\n"
+        "CCW (A1)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Stealth Cloak", "Banner"}.issubset(eq_names), eq_names
+    # And these must NOT be in rules.
+    rule_set = set(u.rules)
+    assert "Stealth Cloak(Stealth)" not in rule_set
+    assert "Banner(Fear(1))" not in rule_set
+
+
+def test_parse_unit_trailing_spells_section_is_a_boundary():
+    """A glued-on ``Spells`` heading must terminate scan, not be skipped."""
+    s = _section(
+        "Wizard [1] - 100pts\n"
+        "Quality 3+   Defense 5+\n"
+        "Staff (A1)\n"
+        "Tough(3)\n"
+        "Spells\n"
+        "Fireball\n"
+        "Ice Bolt\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    # Spell names must not become rules.
+    assert "Fireball" not in rule_set
+    assert "Ice Bolt" not in rule_set
+
+
 def test_parse_unit_strips_count_prefix_on_rule_tokens():
     """Per-model count prefix on rules ('10x Furious') must be tolerated."""
     s = _section(

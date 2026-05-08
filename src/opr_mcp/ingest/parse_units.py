@@ -69,16 +69,18 @@ _EQUIPMENT_BODY_RE = re.compile(
 _PROFILE_BOUNDARY_HEADINGS = frozenset({
     "upgrades", "options",
     "army special rules", "army wide special rule", "army-wide special rule",
-    "psychic powers", "spell list",
+    "psychic powers", "spell list", "spells",
 })
 # In-profile headings: column/section labels that can appear WITHIN a unit's
 # profile block (e.g. directly above the equipment list). These lines are
 # skipped, but the scan continues — terminating on them would drop the unit's
-# real equipment/rules.
+# real equipment/rules. ``spells`` is intentionally excluded: OPR units don't
+# carry a spells column on their card, so a ``Spells`` heading is always a
+# trailing section.
 _INPROFILE_HEADINGS = frozenset({
     "equipment", "weapons", "special rules", "rules",
     "abilities", "characters", "items", "psychic", "special",
-    "wargear", "armory", "armoury", "loadout", "spells",
+    "wargear", "armory", "armoury", "loadout",
 })
 # Rule token: ``Furious``, ``Tough(3)``, ``AP(2)``, ``Bestial Boost``, also
 # the count-prefixed form OPR uses for per-model rules like ``10x Furious``.
@@ -127,17 +129,31 @@ _BARE_NAME_RE = re.compile(
 )
 
 
-def _classify_paren_body(body: str) -> str:
-    """Return ``'weapon'``, ``'equipment'`` or ``'rule'`` for a paren body.
+def _classify_paren_item(name: str, body: str) -> str:
+    """Return ``'weapon'``, ``'equipment'`` or ``'rule'`` for a paren item.
 
-    ``weapon`` means the body has a weapon attacks marker (``A1``/``A2``/
-    ``A3x``); ``equipment`` means it has range / weapon-special / multi-word
-    phrase (``Shield Wall``); anything else is treated as a parametric rule
-    body (a number or a single word/identifier).
+    Layered rules:
+
+    - ``A<n>`` attack marker in body → ``weapon``.
+    - Range / weapon-special / multi-word capitalized phrase in body →
+      ``equipment``.
+    - Multi-word *name* (``Stealth Cloak``, ``Combat Shield``,
+      ``Power Sword``) → ``equipment``. A multi-word noun phrase is gear
+      with a rule descriptor in parens, not itself a rule.
+    - Body has nested parens (``Fear(1)``, ``Tough(2)``) → ``equipment``.
+      The body is itself a parametric rule, so the surrounding token is a
+      named gear item that confers that rule (e.g.
+      ``Banner (Fear(1))``).
+    - Otherwise → ``rule`` (single-word name + simple body, e.g.
+      ``Tough(3)``, ``Aura(Friendly)``).
     """
     if _WEAPON_ATTACKS_RE.search(body):
         return "weapon"
     if _EQUIPMENT_BODY_RE.search(body):
+        return "equipment"
+    if " " in name.strip():
+        return "equipment"
+    if "(" in body:
         return "equipment"
     return "rule"
 
@@ -189,7 +205,7 @@ def _parse_paren_line(line: str) -> tuple[list[dict], list[str]] | None:
     equipment: list[dict] = []
     rule_tokens: list[str] = []
     for name, body in raw_items:
-        kind = _classify_paren_body(body)
+        kind = _classify_paren_item(name, body)
         if kind == "rule":
             rule_tokens.append(f"{name}({body})")
         else:
@@ -231,9 +247,11 @@ def _detect_stat_anchor(text: str) -> bool:
 
     We accept lone bare rules (``Hero``) and leading defensive gear
     (``Combat Shield (Shield Wall)``) only when something else on the same
-    card definitively confirms this is a stat block. Without this guard,
-    incidental TitleCase phrases inside flavor text could pollute the index.
+    card definitively confirms this is a stat block, AND only after the
+    Q/D stat line: pre-profile flavor text (a glued-on role line like
+    ``Veteran Warriors`` before the actual card) must not be considered.
     """
+    past_stats_line = False
     for line in text.splitlines():
         s = line.strip()
         if not s:
@@ -242,7 +260,12 @@ def _detect_stat_anchor(text: str) -> bool:
             break
         if _is_inprofile_heading(s):
             continue
-        if _UNIT_NAME_LINE_RE.match(s) or _QUALITY_DEF_RE.search(s):
+        if _UNIT_NAME_LINE_RE.match(s):
+            continue
+        if _QUALITY_DEF_RE.search(s):
+            past_stats_line = True
+            continue
+        if not past_stats_line:
             continue
         if _line_anchors_stat_block(s):
             return True
@@ -377,6 +400,7 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         seen_equipment.add(key)
         equipment.append(it)
 
+    past_stats_line = False
     for line in text.splitlines():
         s = line.strip()
         if not s:
@@ -394,8 +418,18 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         if _is_inprofile_heading(s):
             continue
 
-        # Skip the name+stats lines so they don't get scanned for weapons/rules.
-        if _UNIT_NAME_LINE_RE.match(s) or _QUALITY_DEF_RE.search(s):
+        # Skip the name+stats lines and remember whether we've passed the
+        # Q/D stat line. Anything before Q/D (the unit-title line in the
+        # plain-title layout, glued-on flavor text like ``Veteran
+        # Warriors``) must not be processed as equipment or rules — it
+        # would otherwise leak into rules_json simply because the second
+        # pass starts in_stat_block=True.
+        if _UNIT_NAME_LINE_RE.match(s):
+            continue
+        if _QUALITY_DEF_RE.search(s):
+            past_stats_line = True
+            continue
+        if not past_stats_line:
             continue
 
         # Parenthesized list: split per-item by body shape. Weapon and
