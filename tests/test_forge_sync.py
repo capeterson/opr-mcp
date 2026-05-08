@@ -97,7 +97,9 @@ def test_sync_detects_unchanged_render_id(tmp_db, tmp_path):
 
 
 def test_sync_detects_changed_render_id(tmp_db, tmp_path):
-    """A new renderId for the same (uid, gs) pair triggers a re-download."""
+    """A new renderId for an existing (uid, gs) pair appends a new historical
+    row (the previous version is retained on disk and in the DB until the
+    retention sweeper trims it)."""
     conn = db.open_db(tmp_db)
     book = _book("U1", "B", [4])
     written: dict[Path, bytes] = {}
@@ -116,9 +118,13 @@ def test_sync_detects_changed_render_id(tmp_db, tmp_path):
         rid["value"] = "RID2"
         stats = sync.sync(conn, tmp_path, game_systems=[4])
 
-    row = conn.execute("SELECT render_id FROM forge_books WHERE uid='U1'").fetchone()
-    assert row["render_id"] == "RID2"
+    rows = conn.execute(
+        "SELECT render_id FROM forge_books WHERE uid='U1' ORDER BY render_id"
+    ).fetchall()
+    assert [r["render_id"] for r in rows] == ["RID1", "RID2"]
     assert stats.changed == 1 and stats.new == 0
+    # Both historical PDFs remain on disk.
+    assert len(written) == 2
 
 
 def test_sync_no_download_mode_skips_writes(tmp_db, tmp_path):
@@ -161,11 +167,13 @@ def test_sync_records_failed_downloads(tmp_db, tmp_path):
 
 def test_local_filename_is_stable_per_pair():
     book = {"uid": "abc", "name": "Beast Men!"}
-    name1 = sync.local_filename(book, 4)
-    name2 = sync.local_filename(book, 4)
-    name3 = sync.local_filename(book, 5)
-    assert name1 == name2  # stable
+    name1 = sync.local_filename(book, 4, "RID1")
+    name2 = sync.local_filename(book, 4, "RID1")
+    name3 = sync.local_filename(book, 5, "RID1")
+    name4 = sync.local_filename(book, 4, "RID2")
+    assert name1 == name2  # stable for the same (uid, gs, render_id)
     assert name1 != name3  # game-system-scoped
+    assert name1 != name4  # render_id-scoped: rotating versions land in distinct files
     assert name1.endswith(".pdf")
     assert "abc" in name1  # uid is in the filename
 
@@ -175,7 +183,7 @@ def test_local_filename_immutable_under_book_rename():
     next sync would download alongside the old file instead of overwriting."""
     before = {"uid": "X", "name": "Old Faction"}
     after = {"uid": "X", "name": "Renamed Faction"}
-    assert sync.local_filename(before, 4) == sync.local_filename(after, 4)
+    assert sync.local_filename(before, 4, "R") == sync.local_filename(after, 4, "R")
 
 
 def test_sync_records_resolve_failures_in_stats(tmp_db, tmp_path):
@@ -238,7 +246,7 @@ def test_sync_prunes_rows_for_books_no_longer_returned(tmp_db, tmp_path):
     ):
         sync.sync(conn, tmp_path, game_systems=[4])
 
-    b_path = tmp_path / sync.local_filename(book_b, 4)
+    b_path = tmp_path / sync.local_filename(book_b, 4, "RID1")
     assert b_path.exists()
     assert conn.execute("SELECT COUNT(*) FROM forge_books").fetchone()[0] == 2
 
@@ -378,10 +386,14 @@ def test_no_download_does_not_advance_render_id(tmp_db, tmp_path):
         stats = sync.sync(conn, tmp_path, game_systems=[4], download=False, prune=False)
     assert stats.changed == 1
 
-    row = conn.execute("SELECT render_id FROM forge_books WHERE uid='U'").fetchone()
-    assert row["render_id"] == "RID1"
+    rids = {
+        r["render_id"]
+        for r in conn.execute("SELECT render_id FROM forge_books WHERE uid='U'")
+    }
+    # Dry-run must not have inserted a row for RID2.
+    assert rids == {"RID1"}
 
-    # Subsequent normal scan with RID2 must actually download.
+    # Subsequent normal scan with RID2 must actually download and append a new row.
     written: dict[Path, bytes] = {}
     with (
         patch.object(api, "list_books", return_value=[book]),
@@ -391,8 +403,11 @@ def test_no_download_does_not_advance_render_id(tmp_db, tmp_path):
         stats = sync.sync(conn, tmp_path, game_systems=[4])
     assert stats.changed == 1
     assert len(written) == 1
-    row = conn.execute("SELECT render_id FROM forge_books WHERE uid='U'").fetchone()
-    assert row["render_id"] == "RID2"
+    rids = {
+        r["render_id"]
+        for r in conn.execute("SELECT render_id FROM forge_books WHERE uid='U'")
+    }
+    assert rids == {"RID1", "RID2"}
 
 
 def test_prune_keeps_rows_when_unlink_fails(tmp_db, tmp_path, monkeypatch):
@@ -448,7 +463,7 @@ def test_no_download_disables_pruning(tmp_db, tmp_path):
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
     ):
         sync.sync(conn, tmp_path, game_systems=[4])
-    pdf_path = tmp_path / sync.local_filename(book, 4)
+    pdf_path = tmp_path / sync.local_filename(book, 4, "RID1")
     assert pdf_path.exists()
 
     # Dry-run scan where the book has disappeared. With prune=False, files

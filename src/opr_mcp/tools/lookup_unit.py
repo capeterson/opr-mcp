@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from . import filtered_document_ids
+
 
 def _normalize(s: str) -> str:
     return "".join(ch.lower() for ch in s if ch.isalnum())
@@ -13,20 +15,29 @@ def run(
     name: str,
     *,
     army: str | None = None,
+    version: str | None = None,
 ) -> list[dict]:
     """Fuzzy lookup: case-insensitive substring match on unit name.
 
-    Returns multiple rows when a name is ambiguous across armies.
+    Returns multiple rows when a name is ambiguous across armies. When
+    ``version`` is omitted, only the latest version of each
+    (game_system, army) book is considered.
     """
-    sql = """
+    doc_ids = filtered_document_ids(conn, army=army, version=version)
+    if not doc_ids:
+        return []
+
+    placeholders = ",".join("?" * len(doc_ids))
+    sql = f"""
         SELECT u.id, u.army, u.name, u.qty, u.quality, u.defense, u.base_points,
-               u.equipment_json, u.rules_json, d.filename, c.page
+               u.equipment_json, u.rules_json, d.filename, d.version, c.page
         FROM units u
         JOIN documents d ON d.id = u.document_id
         LEFT JOIN chunks c ON c.id = u.chunk_id
         WHERE LOWER(u.name) LIKE ?
+          AND u.document_id IN ({placeholders})
     """
-    params: list = [f"%{name.lower()}%"]
+    params: list = [f"%{name.lower()}%", *doc_ids]
     if army:
         sql += " AND LOWER(u.army) = ?"
         params.append(army.lower())
@@ -65,7 +76,11 @@ def run(
                 "base_points": r["base_points"],
                 "equipment": equipment,
                 "rules": rules,
-                "source": {"filename": r["filename"], "page": r["page"]},
+                "source": {
+                    "filename": r["filename"],
+                    "page": r["page"],
+                    "version": r["version"],
+                },
             }
         )
     return out

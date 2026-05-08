@@ -12,6 +12,7 @@ def run(
     limit: int = 10,
     game_system: str | None = None,
     army: str | None = None,
+    version: str | None = None,
 ) -> list[dict]:
     results = hybrid_search(
         conn,
@@ -19,6 +20,7 @@ def run(
         limit=limit,
         game_system=game_system,
         army=army,
+        version=version,
     )
     return [
         {

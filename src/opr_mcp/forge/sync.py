@@ -42,13 +42,20 @@ def _slugify(s: str) -> str:
     return _FILENAME_SAFE.sub("-", s).strip("-").lower() or "book"
 
 
-def local_filename(book: dict, game_system: int) -> str:
-    """Stable per-(book, game_system) filename so re-downloads overwrite in place.
+def local_filename(book: dict, game_system: int, render_id: str) -> str:
+    """Stable per-(book, game_system, render_id) filename.
 
-    Keyed only on immutable identifiers (game-system slug + uid) so a book
-    rename on Forge doesn't leave the previous PDF behind under a new name.
+    Keyed on immutable identifiers (game-system slug + uid + render_id) so:
+    - a book rename on Forge doesn't leave the previous PDF behind under a new
+      name, and
+    - successive renderId rotations land in distinct files instead of
+      overwriting in place. Historical versions stay on disk until the
+      retention sweeper trims them.
     """
-    return f"{api.GAME_SYSTEMS[game_system]}__{_slugify(book['uid'])}.pdf"
+    return (
+        f"{api.GAME_SYSTEMS[game_system]}__{_slugify(book['uid'])}"
+        f"__{_slugify(render_id)}.pdf"
+    )
 
 
 @dataclass
@@ -152,6 +159,41 @@ def _delete_ingested_document(conn: sqlite3.Connection, local_path: str) -> None
     conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
 
 
+def _drop_forge_version(
+    conn: sqlite3.Connection,
+    *,
+    uid: str,
+    game_system: int,
+    render_id: str,
+    local_path: str | None,
+) -> bool:
+    """Remove one historical forge_books row + its on-disk PDF + ingested doc.
+
+    Returns False (keeping the row) if the on-disk file couldn't be unlinked,
+    so the next sweep retries instead of orphaning a PDF the watcher would
+    reingest as an unmanaged document.
+    """
+    if local_path:
+        p = Path(local_path)
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError as exc:
+                log.warning(
+                    "forge: leaving %s mirrored — could not unlink stale "
+                    "PDF: %s. Will retry on the next scan.",
+                    p, exc,
+                )
+                return False
+        _delete_ingested_document(conn, local_path)
+    conn.execute(
+        "DELETE FROM forge_books WHERE uid = ? AND game_system = ? "
+        "AND render_id = ?",
+        (uid, game_system, render_id),
+    )
+    return True
+
+
 def _prune_stale(
     conn: sqlite3.Connection,
     *,
@@ -172,7 +214,7 @@ def _prune_stale(
     placeholders_gs = ",".join("?" * len(target_gs))
     placeholders_off = ",".join("?" * len(official_scope))
     rows = conn.execute(
-        f"SELECT uid, game_system, local_path FROM forge_books "
+        f"SELECT uid, game_system, render_id, local_path FROM forge_books "
         f"WHERE game_system IN ({placeholders_gs}) "
         f"AND official IN ({placeholders_off})",
         [*target_gs, *official_scope],
@@ -182,30 +224,19 @@ def _prune_stale(
         key = (r["uid"], r["game_system"])
         if key in expected:
             continue
-        local_path = r["local_path"]
-        if local_path:
-            p = Path(local_path)
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError as exc:
-                    # Leave the row in place so the next scan retries; if we
-                    # dropped the DB cleanup now, the still-on-disk PDF would
-                    # get re-ingested as an unmanaged document on the next
-                    # watcher pass.
-                    log.warning(
-                        "forge: leaving %s mirrored — could not unlink stale "
-                        "PDF: %s. Will retry on the next scan.",
-                        p, exc,
-                    )
-                    continue
-            _delete_ingested_document(conn, local_path)
-        conn.execute(
-            "DELETE FROM forge_books WHERE uid = ? AND game_system = ?", key,
-        )
-        conn.commit()
-        pruned += 1
-        log.info("forge: pruned stale book uid=%s gs=%d", *key)
+        if _drop_forge_version(
+            conn,
+            uid=r["uid"],
+            game_system=r["game_system"],
+            render_id=r["render_id"],
+            local_path=r["local_path"],
+        ):
+            conn.commit()
+            pruned += 1
+            log.info(
+                "forge: pruned stale book uid=%s gs=%d render_id=%s",
+                r["uid"], r["game_system"], r["render_id"],
+            )
     return pruned
 
 
@@ -279,22 +310,31 @@ def sync(
                 continue
 
             render_id = api.render_id_from_path(r.pdf_path)
+            # A row keyed exactly on (uid, gs, render_id) means we've already
+            # mirrored this version. Any *other* render_id rows for the same
+            # (uid, gs) are historical versions kept for the retention rule;
+            # a new render_id here is a new version, not a replacement.
             prev = conn.execute(
-                "SELECT render_id, local_path, last_changed FROM forge_books "
-                "WHERE uid = ? AND game_system = ?",
+                "SELECT local_path, last_changed FROM forge_books "
+                "WHERE uid = ? AND game_system = ? AND render_id = ?",
+                (uid, gid, render_id),
+            ).fetchone()
+            any_prior = conn.execute(
+                "SELECT 1 FROM forge_books WHERE uid = ? AND game_system = ?",
                 (uid, gid),
             ).fetchone()
-            local = pdf_dir / local_filename(book, gid)
+            local = pdf_dir / local_filename(book, gid, render_id)
 
-            is_new = prev is None
-            is_changed = (not is_new) and prev["render_id"] != render_id
-            would_download = is_new or is_changed or not local.exists()
+            is_new_book = any_prior is None
+            is_known_version = prev is not None
+            is_changed = (not is_known_version) and (any_prior is not None)
+            would_download = (not is_known_version) or not local.exists()
 
             if would_download and not download:
-                # Dry-run: count what would change but don't persist the new
-                # render_id, or the next non-dry-run scan would think the
+                # Dry-run: count what would change but don't persist a new
+                # render_id row, or the next non-dry-run scan would think the
                 # book was already up-to-date and skip the actual download.
-                if is_new:
+                if is_new_book:
                     stats.new += 1
                 else:
                     stats.changed += 1
@@ -311,14 +351,18 @@ def sync(
                     continue
                 log.info(
                     "forge: %s %s gs=%d -> %s (%.1f KiB)",
-                    "added" if is_new else "updated",
+                    "added" if is_new_book else "updated",
                     label, gid, local.name, size / 1024,
                 )
                 last_changed = now
-                if is_new:
+                if is_new_book:
                     stats.new += 1
-                else:
+                elif is_changed:
                     stats.changed += 1
+                else:
+                    # File was missing on disk but the row already existed —
+                    # treat as a recovery; no change-counter bump.
+                    pass
             else:
                 stats.unchanged += 1
                 last_changed = prev["last_changed"] if prev else now
@@ -326,31 +370,29 @@ def sync(
             conn.execute(
                 """
                 INSERT INTO forge_books
-                  (uid, game_system, name, faction, version, official,
-                   pdf_filename, pdf_path, render_id, local_path,
+                  (uid, game_system, render_id, name, faction, version, official,
+                   pdf_filename, pdf_path, local_path,
                    last_checked, last_changed)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(uid, game_system) DO UPDATE SET
+                ON CONFLICT(uid, game_system, render_id) DO UPDATE SET
                   name=excluded.name,
                   faction=excluded.faction,
                   version=excluded.version,
                   official=excluded.official,
                   pdf_filename=excluded.pdf_filename,
                   pdf_path=excluded.pdf_path,
-                  render_id=excluded.render_id,
                   local_path=excluded.local_path,
                   last_checked=excluded.last_checked,
                   last_changed=excluded.last_changed
                 """,
                 (
-                    uid, gid,
+                    uid, gid, render_id,
                     label,
                     book.get("factionName") or "",
                     book.get("versionString") or "",
                     1 if book.get("official") else 0,
                     r.pdf_name,
                     r.pdf_path,
-                    render_id,
                     str(local),
                     now,
                     last_changed,

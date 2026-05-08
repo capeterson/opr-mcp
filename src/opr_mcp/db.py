@@ -7,7 +7,7 @@ import sqlite_vec
 
 from .config import EMBED_DIM, db_path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA = f"""
@@ -23,9 +23,11 @@ CREATE TABLE IF NOT EXISTS documents (
     game_system   TEXT,
     title         TEXT,
     army          TEXT,
+    version       TEXT,
     page_count    INTEGER,
     ingested_at   TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_documents_sys_army_ver ON documents(game_system, army, version);
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            INTEGER PRIMARY KEY,
@@ -92,19 +94,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
 CREATE TABLE IF NOT EXISTS forge_books (
     uid           TEXT NOT NULL,
     game_system   INTEGER NOT NULL,
+    render_id     TEXT NOT NULL,
     name          TEXT,
     faction       TEXT,
     version       TEXT,
     official      INTEGER NOT NULL DEFAULT 1,
     pdf_filename  TEXT,
     pdf_path      TEXT,
-    render_id     TEXT,
     local_path    TEXT,
     last_checked  TEXT NOT NULL,
     last_changed  TEXT NOT NULL,
-    PRIMARY KEY (uid, game_system)
+    PRIMARY KEY (uid, game_system, render_id)
 );
 CREATE INDEX IF NOT EXISTS idx_forge_changed ON forge_books(last_changed);
+CREATE INDEX IF NOT EXISTS idx_forge_book ON forge_books(uid, game_system);
+CREATE INDEX IF NOT EXISTS idx_forge_local_path ON forge_books(local_path);
 """
 
 

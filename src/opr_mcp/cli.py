@@ -152,6 +152,8 @@ def serve(
     watched: list[Path] = [pdf_dir.resolve()]
 
     if forge_sync:
+        from .cleanup_scheduler import CleanupScheduler
+        from .cleanup_scheduler import interval_seconds as cleanup_interval
         from .forge import config as fcfg
         from .forge.scheduler import ForgeScheduler
         target = fcfg.pdf_dir(pdf_dir)
@@ -167,13 +169,20 @@ def serve(
             initial_ingest(target)
             start_watcher(target)
             watched.append(target_resolved)
-        scheduler = ForgeScheduler(
+        allowed = fcfg.games()
+        ForgeScheduler(
             pdf_dir=target,
             interval_seconds=fcfg.interval_seconds(),
             filters=fcfg.filters(),
-            game_systems=fcfg.games(),
-        )
-        scheduler.start()
+            game_systems=allowed,
+        ).start()
+        # Run the retention sweep on its own (typically daily) interval. Tied
+        # to forge_sync because it's the forge mirror that grows without
+        # bound; manual PDFs are user-managed.
+        CleanupScheduler(
+            interval_seconds=cleanup_interval(),
+            allowed_game_systems=allowed,
+        ).start()
 
     if host is not None:
         os.environ["HOST"] = host
@@ -255,6 +264,49 @@ def forge_scan(
             typer.echo(f"  ! {name}: {err}")
         # Non-zero exit so cron / CI can distinguish a partial mirror from a
         # clean run and trigger a retry instead of moving on.
+        raise typer.Exit(code=1)
+
+
+@app.command(name="cleanup")
+def cleanup_cmd(
+    retain: int = typer.Option(
+        3,
+        "--retain",
+        help="Number of most recent forge versions to keep per (game_system, army-book).",
+    ),
+    all_systems: bool = typer.Option(
+        False,
+        "--all-systems",
+        help="Apply only the version-cap rule; ignore FORGE_GAMES (don't purge "
+             "books for systems the server no longer covers).",
+    ),
+) -> None:
+    """Run the retention sweeper once.
+
+    Honors ``FORGE_GAMES`` by default: forge content for game systems no
+    longer in scope is purged regardless of the ``--retain`` cap. Manually
+    added PDFs are never touched by this command.
+    """
+    configure_logging()
+    from . import cleanup as cleanup_mod
+    from .forge import config as fcfg
+    conn = db.open_db()
+    allowed = None if all_systems else fcfg.games()
+    allowed_set = set(allowed) if allowed is not None else None
+    stats = cleanup_mod.sweep(
+        conn,
+        allowed_game_systems=allowed_set,
+        retain_versions=retain,
+    )
+    typer.echo(
+        f"Cleanup: pruned {stats.total_pruned} "
+        f"({stats.pruned_out_of_scope} out-of-scope, "
+        f"{stats.pruned_old_versions} old versions); "
+        f"{stats.skipped_locked} skipped, {len(stats.failures)} failures"
+    )
+    if stats.failures:
+        for f in stats.failures[:10]:
+            typer.echo(f"  ! {f}")
         raise typer.Exit(code=1)
 
 

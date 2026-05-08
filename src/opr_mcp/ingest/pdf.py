@@ -60,7 +60,7 @@ _FTL_TOKEN_RE = re.compile(r"\bftl\b")
 
 _BANNER_RE = re.compile(
     r"^\s*(?P<sys>AOFQAI|AOFQ|AOFR|AOFS|AOF|GFSQAI|GFSQ|GFS|GFF|FF|GF|FTL)"
-    r"\s*-\s*(?P<army>[A-Z][A-Z' &]+?)\s*V[\d.]+\s*$",
+    r"\s*-\s*(?P<army>[A-Z][A-Z' &]+?)\s*V(?P<version>[\d.]+)\s*$",
     re.MULTILINE,
 )
 # AI variants render the same army books with AI-friendly formatting; route
@@ -104,6 +104,7 @@ def detect_metadata(path: Path, sample_pages: int = 3) -> dict:
             "game_system": _SYSTEM_FROM_BANNER.get(m.group("sys").upper()),
             "title": m.group(0).strip(),
             "army": army,
+            "version": m.group("version").strip(),
         }
 
     lower = text.lower()
@@ -134,4 +135,5 @@ def detect_metadata(path: Path, sample_pages: int = 3) -> dict:
         "game_system": game_system if not is_core else "core",
         "title": title,
         "army": None,
+        "version": None,
     }
