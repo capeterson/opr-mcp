@@ -1,4 +1,23 @@
+import pytest
+
 from opr_mcp import db
+
+
+def test_open_db_creates_missing_file(tmp_path):
+    p = tmp_path / "fresh" / "opr.db"
+    assert not p.exists()
+    conn = db.open_db(p)
+    try:
+        assert p.exists()
+        version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+        assert version == db.SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_open_db_rejects_directory_path(tmp_path):
+    with pytest.raises(RuntimeError, match="is a directory"):
+        db.open_db(tmp_path)
 
 
 def test_open_db_creates_schema(tmp_db):
