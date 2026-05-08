@@ -5,7 +5,12 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
-from mcp.server.auth.provider import AuthorizationParams, TokenError
+from mcp.server.auth.provider import (
+    AuthorizationParams,
+    AuthorizeError,
+    RegistrationError,
+    TokenError,
+)
 from mcp.shared.auth import OAuthClientInformationFull
 from pydantic import AnyUrl
 
@@ -341,6 +346,85 @@ async def test_refresh_caps_access_token_at_grant_deadline(tmp_db):
     # The OAuth response's expires_in is bounded by the grant deadline as well,
     # not the larger access_token_ttl.
     assert rotated.expires_in <= cfg.refresh_token_ttl
+
+
+async def test_register_rejects_unsupported_auth_method(provider):
+    bad = _make_client("client-bad").model_copy(
+        update={"token_endpoint_auth_method": "private_key_jwt"}
+    )
+    with pytest.raises(RegistrationError) as exc:
+        await provider.register_client(bad)
+    assert exc.value.error == "invalid_client_metadata"
+
+
+@pytest.mark.parametrize("good", ["none", "client_secret_post", "client_secret_basic"])
+async def test_register_accepts_supported_auth_methods(provider, good):
+    info = _make_client(f"client-{good}").model_copy(update={"token_endpoint_auth_method": good})
+    await provider.register_client(info)
+    loaded = await provider.get_client(info.client_id)
+    assert loaded is not None and loaded.token_endpoint_auth_method == good
+
+
+async def test_authorize_rejects_foreign_resource(provider):
+    client = await provider.get_client("client-1")
+    params = AuthorizationParams(
+        state="s",
+        scopes=["mcp"],
+        code_challenge="c",
+        redirect_uri=AnyUrl("https://app.example.com/cb"),
+        redirect_uri_provided_explicitly=True,
+        resource="https://other.example.com/mcp",
+    )
+    with pytest.raises(AuthorizeError) as exc:
+        await provider.authorize(client, params)
+    assert exc.value.error == "invalid_request"
+
+
+async def test_authorize_accepts_matching_resource(provider):
+    client = await provider.get_client("client-1")
+    params = AuthorizationParams(
+        state="s",
+        scopes=["mcp"],
+        code_challenge="c",
+        redirect_uri=AnyUrl("https://app.example.com/cb"),
+        redirect_uri_provided_explicitly=True,
+        resource="https://opr.example.com/mcp",
+    )
+    url = await provider.authorize(client, params)
+    assert url.startswith("https://discord.com/oauth2/authorize?")
+
+
+async def test_auth_code_is_single_use(provider):
+    """Two concurrent /token requests for the same code: only one wins."""
+    client = await provider.get_client("client-1")
+    discord_url = await provider.authorize(client, _make_params())
+    pending = await provider.take_pending_for_state(_query_param(discord_url, "state"))
+    redirect = await provider.complete_discord_callback(pending=pending, code="x")
+    mcp_code = _query_param(redirect, "code")
+    auth_code = await provider.load_authorization_code(client, mcp_code)
+
+    first = await provider.exchange_authorization_code(client, auth_code)
+    assert first.access_token
+
+    # Second exchange of the same code (e.g. retry, replay) must fail.
+    with pytest.raises(TokenError) as exc:
+        await provider.exchange_authorization_code(client, auth_code)
+    assert exc.value.error == "invalid_grant"
+
+
+async def test_refresh_token_is_single_use(provider):
+    """Replaying a rotated refresh token is rejected."""
+    _, first = await _issue_pair(provider)
+    client = await provider.get_client("client-1")
+    rt = await provider.load_refresh_token(client, first.refresh_token)
+
+    rotated = await provider.exchange_refresh_token(client, rt, ["mcp"])
+    assert rotated.access_token
+
+    # The original refresh row was deleted by the atomic take; replay fails.
+    with pytest.raises(TokenError) as exc:
+        await provider.exchange_refresh_token(client, rt, ["mcp"])
+    assert exc.value.error == "invalid_grant"
 
 
 def _query_param(url: str, key: str) -> str:

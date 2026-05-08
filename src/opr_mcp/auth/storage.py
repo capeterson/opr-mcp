@@ -217,9 +217,40 @@ class AuthStorage:
             expires_at=row["expires_at"],
         )
 
-    async def consume_auth_code(self, code: str) -> None:
-        self._conn.execute("DELETE FROM oauth_auth_codes WHERE code_hash = ?", (hash_token(code),))
+    async def take_auth_code(self, code: str) -> StoredAuthCode | None:
+        """Atomically delete and return the auth-code row, or None if absent.
+
+        SELECT-then-DELETE inside a single sync method has no asyncio yield
+        point between the two SQL statements, so concurrent /token calls for
+        the same code cannot both observe the row before either consumes it.
+        """
+        h = hash_token(code)
+        row = self._conn.execute(
+            "SELECT * FROM oauth_auth_codes WHERE code_hash = ?", (h,)
+        ).fetchone()
+        if not row:
+            return None
+        cur = self._conn.execute(
+            "DELETE FROM oauth_auth_codes WHERE code_hash = ?", (h,)
+        )
         self._conn.commit()
+        if cur.rowcount != 1:
+            # Lost the race to a concurrent caller (cross-connection / cross-process).
+            return None
+        if row["expires_at"] < now():
+            return None
+        return StoredAuthCode(
+            code=code,
+            client_id=row["client_id"],
+            redirect_uri=row["redirect_uri"],
+            redirect_explicit=bool(row["redirect_explicit"]),
+            code_challenge=row["code_challenge"],
+            scopes=json.loads(row["scopes_json"]),
+            discord_user_id=row["discord_user_id"],
+            discord_username=row["discord_username"],
+            resource=row["resource"],
+            expires_at=row["expires_at"],
+        )
 
     # --- access tokens ---
 
@@ -282,6 +313,36 @@ class AuthStorage:
             (hash_token(token),),
         ).fetchone()
         if not row:
+            return None
+        if row["expires_at"] is not None and row["expires_at"] < now():
+            return None
+        return StoredRefreshToken(
+            token=token,
+            grant_id=row["grant_id"],
+            client_id=row["client_id"],
+            discord_user_id=row["discord_user_id"],
+            scopes=json.loads(row["scopes_json"]),
+            resource=row["resource"],
+            expires_at=row["expires_at"],
+        )
+
+    async def take_refresh_token(self, token: str) -> StoredRefreshToken | None:
+        """Atomically delete and return the refresh-token row.
+
+        Used to make refresh rotation single-winner: concurrent rotations of
+        the same refresh token cannot both observe it as still valid.
+        """
+        h = hash_token(token)
+        row = self._conn.execute(
+            "SELECT * FROM oauth_refresh_tokens WHERE token_hash = ?", (h,)
+        ).fetchone()
+        if not row:
+            return None
+        cur = self._conn.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE token_hash = ?", (h,)
+        )
+        self._conn.commit()
+        if cur.rowcount != 1:
             return None
         if row["expires_at"] is not None and row["expires_at"] < now():
             return None

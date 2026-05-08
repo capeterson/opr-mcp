@@ -16,8 +16,10 @@ from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
     OAuthAuthorizationServerProvider,
     RefreshToken,
+    RegistrationError,
     TokenError,
     construct_redirect_uri,
 )
@@ -31,6 +33,12 @@ log = logging.getLogger(__name__)
 AUTH_CODE_TTL = 600  # seconds
 STATE_MAX_AGE = 600  # seconds
 DEFAULT_SCOPES: tuple[str, ...] = ("mcp",)
+# Auth methods the MCP 1.27.0 ClientAuthenticator can actually verify at /token.
+# Anything else (e.g. private_key_jwt, tls_client_auth) registers fine but then
+# every token request fails with "Unsupported auth method", so we reject up front.
+SUPPORTED_AUTH_METHODS: frozenset[str] = frozenset(
+    {"none", "client_secret_post", "client_secret_basic"}
+)
 
 
 class DiscordOAuthProvider(
@@ -54,6 +62,15 @@ class DiscordOAuthProvider(
         return await self._store.get_client(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        method = client_info.token_endpoint_auth_method
+        if method not in SUPPORTED_AUTH_METHODS:
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description=(
+                    f"token_endpoint_auth_method {method!r} is not supported; "
+                    f"use one of {sorted(SUPPORTED_AUTH_METHODS)}"
+                ),
+            )
         await self._store.save_client(client_info)
 
     # --- /authorize ---
@@ -72,6 +89,20 @@ class DiscordOAuthProvider(
         else:
             scopes = list(DEFAULT_SCOPES)
 
+        # RFC 8707: if the client requested a specific resource, it must match
+        # this server's MCP endpoint. Otherwise we'd happily mint a token
+        # bound to some other audience and the SDK's bearer middleware
+        # (which doesn't enforce the resource claim) would still accept it.
+        resource = params.resource
+        if resource is not None and resource != self._config.mcp_resource_url:
+            raise AuthorizeError(
+                error="invalid_request",
+                error_description=(
+                    f"resource {resource!r} does not match this server "
+                    f"({self._config.mcp_resource_url!r})"
+                ),
+            )
+
         pending_id = secrets.token_urlsafe(16)
         await self._store.save_pending(
             storage.PendingAuthorization(
@@ -82,7 +113,7 @@ class DiscordOAuthProvider(
                 code_challenge=params.code_challenge,
                 scopes=scopes,
                 state=params.state,
-                resource=params.resource,
+                resource=resource,
                 expires_at=storage.now() + STATE_MAX_AGE,
             )
         )
@@ -192,10 +223,11 @@ class DiscordOAuthProvider(
         client: OAuthClientInformationFull,
         authorization_code: AuthorizationCode,
     ) -> OAuthToken:
-        stored = await self._store.load_auth_code(authorization_code.code)
+        # Atomic delete-and-return: only one concurrent /token call can win
+        # the race for a single-use authorization code.
+        stored = await self._store.take_auth_code(authorization_code.code)
         if not stored or stored.client_id != client.client_id:
             raise TokenError("invalid_grant", "authorization code not found")
-        await self._store.consume_auth_code(authorization_code.code)
         return await self._issue_tokens(
             client_id=stored.client_id,
             discord_user_id=stored.discord_user_id,
@@ -224,18 +256,21 @@ class DiscordOAuthProvider(
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        stored = await self._store.load_refresh_token(refresh_token.token)
+        # Atomic take: of N concurrent rotations of the same refresh token,
+        # only one observes a non-None row and proceeds to issue a new grant.
+        # The losers see None and fail with invalid_grant.
+        stored = await self._store.take_refresh_token(refresh_token.token)
         if not stored or stored.client_id != client.client_id:
             raise TokenError("invalid_grant", "refresh token not found")
         new_scopes = scopes if scopes else stored.scopes
         if not set(new_scopes).issubset(set(stored.scopes)):
             raise TokenError("invalid_scope", "requested scopes exceed original grant")
-        # Rotate: kill the entire prior grant (old access + old refresh) and
-        # issue a fresh pair with the SAME absolute deadline + resource binding.
-        # Re-using the original ``expires_at`` makes the grant non-sliding so a
-        # user removed from the Discord guild can keep MCP access for at most
-        # OPR_MCP_REFRESH_TOKEN_TTL from initial login, rather than indefinitely
-        # by repeatedly refreshing.
+        # Rotation: the prior refresh token is already gone; also invalidate
+        # the access token from the same grant so a single grant never has
+        # more than one active access/refresh pair.
+        # The new pair preserves the original absolute deadline + resource
+        # binding so the grant cannot be extended indefinitely by chained
+        # refreshes.
         await self._store.revoke_grant(stored.grant_id)
         return await self._issue_tokens(
             client_id=stored.client_id,

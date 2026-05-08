@@ -71,6 +71,11 @@ class AuthConfig:
     def discord_redirect_uri(self) -> str:
         return self.public_url.rstrip("/") + "/discord/callback"
 
+    @property
+    def mcp_resource_url(self) -> str:
+        """Canonical RFC 8707 resource identifier for this server's MCP endpoint."""
+        return self.public_url.rstrip("/") + "/mcp"
+
 
 def auth_enabled() -> bool:
     return _bool_env("OPR_MCP_AUTH_ENABLED", False)
