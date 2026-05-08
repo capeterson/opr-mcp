@@ -93,5 +93,9 @@ jobs:
             | tail -n +21 \
             | while read -r created_at id; do
                 echo "Deleting version $id (created $created_at)"
-                gh api -X DELETE "/$base/packages/container/$PACKAGE/versions/$id"
+                # GHCR refuses to delete some versions (e.g. >5000 downloads).
+                # Don't fail the workflow on a single per-version error.
+                if ! gh api -X DELETE "/$base/packages/container/$PACKAGE/versions/$id"; then
+                  echo "::warning::Failed to delete version $id; skipping"
+                fi
               done
