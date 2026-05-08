@@ -12,3 +12,6 @@ dist/
 build/
 *.egg-info/
 .uv/
+
+# Local OPR PDF corpus — never commit licensed game content.
+opr-data/
