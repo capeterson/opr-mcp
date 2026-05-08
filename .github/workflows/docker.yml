@@ -69,11 +69,29 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OWNER: ${{ github.repository_owner }}
+      PACKAGE: ${{ github.event.repository.name }}
     steps:
       - name: Delete old container versions
-        uses: actions/delete-package-versions@v5
-        with:
-          package-name: ${{ github.event.repository.name }}
-          package-type: container
-          min-versions-to-keep: 20
-          delete-only-untagged-versions: false
+        run: |
+          set -euo pipefail
+
+          owner_type=$(gh api "/users/$OWNER" --jq .type)
+          if [ "$owner_type" = "Organization" ]; then
+            base="orgs/$OWNER"
+          else
+            base="users/$OWNER"
+          fi
+
+          # Keep the 20 most recent versions that don't carry a v* tag.
+          # Versions tagged v* (release builds) are always retained.
+          gh api --paginate "/$base/packages/container/$PACKAGE/versions" \
+            --jq '.[] | select(((.metadata.container.tags // []) | map(test("^v")) | any) | not) | "\(.created_at) \(.id)"' \
+            | sort -r \
+            | tail -n +21 \
+            | while read -r created_at id; do
+                echo "Deleting version $id (created $created_at)"
+                gh api -X DELETE "/$base/packages/container/$PACKAGE/versions/$id"
+              done
