@@ -18,18 +18,18 @@ DEFAULT_REFRESH_TTL = 30 * 24 * 3600
 
 
 def db_path() -> Path:
-    env = os.environ.get("OPR_MCP_DB")
+    env = os.environ.get("DB")
     if env:
         return Path(env).expanduser()
     return Path(user_data_dir(APP_NAME, appauthor=False)) / "opr.db"
 
 
 def embed_model_name() -> str:
-    return os.environ.get("OPR_MCP_EMBED_MODEL", DEFAULT_EMBED_MODEL)
+    return os.environ.get("EMBED_MODEL", DEFAULT_EMBED_MODEL)
 
 
 def configure_logging() -> None:
-    level = os.environ.get("OPR_MCP_LOG_LEVEL", "INFO").upper()
+    level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -78,15 +78,15 @@ class AuthConfig:
 
 
 def auth_enabled() -> bool:
-    return _bool_env("OPR_MCP_AUTH_ENABLED", False)
+    return _bool_env("AUTH_ENABLED", False)
 
 
 def http_host() -> str:
-    return os.environ.get("OPR_MCP_HOST", DEFAULT_HTTP_HOST)
+    return os.environ.get("HOST", DEFAULT_HTTP_HOST)
 
 
 def http_port() -> int:
-    return _int_env("OPR_MCP_PORT", DEFAULT_HTTP_PORT)
+    return _int_env("PORT", DEFAULT_HTTP_PORT)
 
 
 # Hostnames we allow over plain HTTP for local development.
@@ -108,19 +108,19 @@ def _is_acceptable_public_url(url: str) -> bool:
 
 def load_auth_config() -> AuthConfig:
     """Load and validate auth config from environment. Call only when auth_enabled()."""
-    public_url = os.environ.get("OPR_MCP_PUBLIC_URL", "").strip()
+    public_url = os.environ.get("PUBLIC_URL", "").strip()
     if not public_url:
-        raise ConfigError("OPR_MCP_PUBLIC_URL is required when OPR_MCP_AUTH_ENABLED=true")
+        raise ConfigError("PUBLIC_URL is required when AUTH_ENABLED=true")
     if not _is_acceptable_public_url(public_url):
         raise ConfigError(
-            "OPR_MCP_PUBLIC_URL must be https:// (http:// is only allowed when the host is localhost or 127.0.0.1)"
+            "PUBLIC_URL must be https:// (http:// is only allowed when the host is localhost or 127.0.0.1)"
         )
 
     required = {
-        "OPR_MCP_DISCORD_CLIENT_ID": os.environ.get("OPR_MCP_DISCORD_CLIENT_ID", "").strip(),
-        "OPR_MCP_DISCORD_CLIENT_SECRET": os.environ.get("OPR_MCP_DISCORD_CLIENT_SECRET", "").strip(),
-        "OPR_MCP_DISCORD_GUILD_ID": os.environ.get("OPR_MCP_DISCORD_GUILD_ID", "").strip(),
-        "OPR_MCP_AUTH_SECRET": os.environ.get("OPR_MCP_AUTH_SECRET", "").strip(),
+        "DISCORD_CLIENT_ID": os.environ.get("DISCORD_CLIENT_ID", "").strip(),
+        "DISCORD_CLIENT_SECRET": os.environ.get("DISCORD_CLIENT_SECRET", "").strip(),
+        "DISCORD_GUILD_ID": os.environ.get("DISCORD_GUILD_ID", "").strip(),
+        "AUTH_SECRET": os.environ.get("AUTH_SECRET", "").strip(),
     }
     missing = [k for k, v in required.items() if not v]
     if missing:
@@ -130,10 +130,10 @@ def load_auth_config() -> AuthConfig:
 
     return AuthConfig(
         public_url=public_url.rstrip("/"),
-        discord_client_id=required["OPR_MCP_DISCORD_CLIENT_ID"],
-        discord_client_secret=required["OPR_MCP_DISCORD_CLIENT_SECRET"],
-        discord_guild_id=required["OPR_MCP_DISCORD_GUILD_ID"],
-        auth_secret=required["OPR_MCP_AUTH_SECRET"],
-        access_token_ttl=_int_env("OPR_MCP_AUTH_TOKEN_TTL", DEFAULT_ACCESS_TTL),
-        refresh_token_ttl=_int_env("OPR_MCP_REFRESH_TOKEN_TTL", DEFAULT_REFRESH_TTL),
+        discord_client_id=required["DISCORD_CLIENT_ID"],
+        discord_client_secret=required["DISCORD_CLIENT_SECRET"],
+        discord_guild_id=required["DISCORD_GUILD_ID"],
+        auth_secret=required["AUTH_SECRET"],
+        access_token_ttl=_int_env("AUTH_TOKEN_TTL", DEFAULT_ACCESS_TTL),
+        refresh_token_ttl=_int_env("REFRESH_TOKEN_TTL", DEFAULT_REFRESH_TTL),
     )

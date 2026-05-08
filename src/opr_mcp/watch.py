@@ -1,8 +1,9 @@
 """Watch a directory for PDF changes and re-ingest in the background.
 
-Used by ``opr-mcp serve --watch``. The watcher runs on a daemon thread with its
-own SQLite connection (the MCP server has its own on the main thread). Events
-are debounced so a flurry of writes during a copy lands as one ingest pass.
+Used by ``opr-mcp serve`` whenever a PDF directory is configured. The watcher
+runs on a daemon thread with its own SQLite connection (the MCP server has its
+own on the main thread). Events are debounced so a flurry of writes during a
+copy lands as one ingest pass.
 """
 from __future__ import annotations
 

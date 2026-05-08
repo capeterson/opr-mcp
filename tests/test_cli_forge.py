@@ -26,7 +26,7 @@ def test_forge_scan_exits_nonzero_when_failures(tmp_db, tmp_path, monkeypatch):
     """Cron / CI need a non-zero exit code to distinguish a partial mirror
     from a clean run.
     """
-    monkeypatch.setenv("OPR_MCP_FORGE_GAMES", "aof")
+    monkeypatch.setenv("FORGE_GAMES", "aof")
 
     def boom(uid: str, gid: int):
         raise api.ArmyForgeError("HTTP 503")
@@ -42,7 +42,7 @@ def test_forge_scan_exits_nonzero_when_failures(tmp_db, tmp_path, monkeypatch):
 
 
 def test_forge_scan_exits_zero_on_clean_run(tmp_db, tmp_path, monkeypatch):
-    monkeypatch.setenv("OPR_MCP_FORGE_GAMES", "aof")
+    monkeypatch.setenv("FORGE_GAMES", "aof")
 
     def stub_resolve(uid: str, gid: int):
         path = f"army-books/pdfs/{uid}~{gid}/RID.pdf"

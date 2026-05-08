@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 # Force a stable, in-process model name so the import-time cache key is stable.
-os.environ.setdefault("OPR_MCP_EMBED_MODEL", "stub")
+os.environ.setdefault("EMBED_MODEL", "stub")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -50,5 +50,5 @@ def _stub_embeddings(monkeypatch):
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
     p = tmp_path / "opr.db"
-    monkeypatch.setenv("OPR_MCP_DB", str(p))
+    monkeypatch.setenv("DB", str(p))
     return p
