@@ -94,7 +94,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
 AUTH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS oauth_clients (
     client_id            TEXT PRIMARY KEY,
-    client_secret_hash   TEXT,
+    client_secret_enc    BLOB,
     info_json            TEXT NOT NULL,
     issued_at            INTEGER NOT NULL
 );
@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS oauth_auth_codes (
 
 CREATE TABLE IF NOT EXISTS oauth_access_tokens (
     token_hash           TEXT PRIMARY KEY,
+    grant_id             TEXT NOT NULL,
     client_id            TEXT NOT NULL,
     discord_user_id      TEXT NOT NULL,
     scopes_json          TEXT NOT NULL,
@@ -134,15 +135,18 @@ CREATE TABLE IF NOT EXISTS oauth_access_tokens (
     expires_at           INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_access_tokens_client ON oauth_access_tokens(client_id);
+CREATE INDEX IF NOT EXISTS idx_access_tokens_grant ON oauth_access_tokens(grant_id);
 
 CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
     token_hash           TEXT PRIMARY KEY,
+    grant_id             TEXT NOT NULL,
     client_id            TEXT NOT NULL,
     discord_user_id      TEXT NOT NULL,
     scopes_json          TEXT NOT NULL,
     expires_at           INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON oauth_refresh_tokens(client_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_grant ON oauth_refresh_tokens(grant_id);
 """
 
 

@@ -80,11 +80,34 @@ async def fetch_user(client: httpx.AsyncClient, access_token: str) -> dict:
     return resp.json()
 
 
-async def fetch_guild_ids(client: httpx.AsyncClient, access_token: str) -> list[str]:
-    resp = await client.get(
-        DISCORD_API_GUILDS,
-        headers={"Authorization": f"Bearer {access_token}"},
-    )
-    if resp.status_code != 200:
-        raise DiscordError(f"Discord /users/@me/guilds failed: HTTP {resp.status_code}")
-    return [g["id"] for g in resp.json()]
+GUILDS_PAGE_SIZE = 200
+GUILDS_MAX_PAGES = 10  # safety bound; 10 * 200 = 2000 guilds
+
+
+async def user_is_in_guild(
+    client: httpx.AsyncClient, access_token: str, guild_id: str
+) -> bool:
+    """Check if the authenticated user is a member of ``guild_id``.
+
+    Pages through ``/users/@me/guilds`` (Discord caps responses at 200) using the
+    ``after`` cursor and short-circuits as soon as the target guild is found.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    after: str | None = None
+    for _ in range(GUILDS_MAX_PAGES):
+        params: dict[str, str] = {"limit": str(GUILDS_PAGE_SIZE)}
+        if after is not None:
+            params["after"] = after
+        resp = await client.get(DISCORD_API_GUILDS, headers=headers, params=params)
+        if resp.status_code != 200:
+            raise DiscordError(f"Discord /users/@me/guilds failed: HTTP {resp.status_code}")
+        page = resp.json()
+        if not page:
+            return False
+        for g in page:
+            if g["id"] == guild_id:
+                return True
+        if len(page) < GUILDS_PAGE_SIZE:
+            return False
+        after = page[-1]["id"]
+    return False

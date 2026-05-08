@@ -163,11 +163,16 @@ token or rejects with HTTP 403.
 
 Notes:
 
-- Tokens are stored as SHA-256 hashes in the same SQLite DB as the rules index.
+- Tokens are stored as SHA-256 hashes; client secrets are encrypted at rest
+  with a key derived from `OPR_MCP_AUTH_SECRET` via Fernet.
+- Access and refresh tokens issued in the same exchange share a `grant_id`,
+  so revoking either one removes both halves of the pair.
 - Guild membership is checked at token-issue time only. Token TTL bounds the
-  revocation lag — to evict a user immediately, lower `OPR_MCP_AUTH_TOKEN_TTL`
-  or run `sqlite3 opr.db "DELETE FROM oauth_access_tokens"` to invalidate all
-  outstanding tokens.
+  revocation lag — to evict everyone immediately, lower
+  `OPR_MCP_AUTH_TOKEN_TTL`, or wipe both tables:
+  `sqlite3 opr.db "DELETE FROM oauth_access_tokens; DELETE FROM oauth_refresh_tokens;"`.
+  Deleting only the access-token table leaves refresh tokens able to mint
+  fresh access tokens, so don't skip the second statement.
 - With `OPR_MCP_AUTH_ENABLED` unset, `serve` behaves exactly as before (stdio,
   no auth) — ideal for local Claude Desktop use.
 

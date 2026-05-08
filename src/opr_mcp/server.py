@@ -43,7 +43,7 @@ def _db():
 
 def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     if with_auth is None:
-        return FastMCP("opr")
+        return FastMCP("opr", host=http_host(), port=http_port())
 
     from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
     from pydantic import AnyHttpUrl
@@ -53,7 +53,7 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
 
     conn = _db()
     db.init_auth_schema(conn)
-    store = AuthStorage(conn)
+    store = AuthStorage(conn, fernet_key_secret=with_auth.auth_secret)
     global _auth_provider
     _auth_provider = DiscordOAuthProvider(with_auth, store)
 
@@ -148,6 +148,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
 
 
 def _register_discord_callback(mcp_obj: FastMCP) -> None:
+    from mcp.server.auth.provider import construct_redirect_uri
     from starlette.requests import Request
     from starlette.responses import PlainTextResponse, RedirectResponse
 
@@ -159,22 +160,45 @@ def _register_discord_callback(mcp_obj: FastMCP) -> None:
         if provider is None:
             return PlainTextResponse("auth not initialised", status_code=500)
 
-        error = request.query_params.get("error")
-        if error:
-            description = request.query_params.get("error_description") or error
-            return PlainTextResponse(f"Discord login failed: {description}", status_code=400)
+        state = request.query_params.get("state")
+        if not state:
+            return PlainTextResponse("missing state", status_code=400)
+
+        # Decode and consume the pending authorization. Without this we can't
+        # safely redirect anywhere, so failure is a plaintext 400.
+        pending = await provider.take_pending_for_state(state)
+        if pending is None:
+            return PlainTextResponse(
+                "authorization request not found or expired", status_code=400
+            )
+
+        # Discord may have returned an error (user denied, app misconfigured, ...).
+        # Forward it back to the original MCP client as an OAuth error redirect
+        # so the client surfaces the failure instead of hanging on its callback.
+        discord_error = request.query_params.get("error")
+        if discord_error:
+            description = request.query_params.get("error_description") or discord_error
+            return _oauth_error_redirect(pending, discord_error, description)
 
         code = request.query_params.get("code")
-        state = request.query_params.get("state")
-        if not code or not state:
-            return PlainTextResponse("missing code or state", status_code=400)
+        if not code:
+            return _oauth_error_redirect(pending, "invalid_request", "missing code")
 
         try:
-            redirect = await provider.complete_discord_callback(code=code, signed_state=state)
+            redirect = await provider.complete_discord_callback(pending=pending, code=code)
         except CallbackError as exc:
-            return PlainTextResponse(exc.message, status_code=exc.status_code)
+            return _oauth_error_redirect(pending, exc.error, exc.description)
 
         return RedirectResponse(redirect, status_code=302)
+
+    def _oauth_error_redirect(pending, error: str, description: str) -> RedirectResponse:
+        url = construct_redirect_uri(
+            pending.redirect_uri,
+            error=error,
+            error_description=description,
+            state=pending.state,
+        )
+        return RedirectResponse(url, status_code=302)
 
 
 def build_server(*, with_auth: AuthConfig | None = None) -> FastMCP:

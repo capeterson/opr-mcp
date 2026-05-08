@@ -84,7 +84,7 @@ def _discord_handler_ok(*, user_id: str = "U1", guild_ids: list[str] | None = No
 async def provider(tmp_db):
     conn = db.open_db(tmp_db)
     db.init_auth_schema(conn)
-    store = AuthStorage(conn)
+    store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config()
     p = DiscordOAuthProvider(cfg, store, http_client_factory=_httpx_factory(_discord_handler_ok()))
     await store.save_client(_make_client())
@@ -105,7 +105,9 @@ async def test_full_happy_path(provider):
     discord_url = await provider.authorize(client, _make_params())
     state = _query_param(discord_url, "state")
 
-    redirect = await provider.complete_discord_callback(code="discord-code", signed_state=state)
+    pending = await provider.take_pending_for_state(state)
+    assert pending is not None
+    redirect = await provider.complete_discord_callback(pending=pending, code="discord-code")
     assert redirect.startswith("https://app.example.com/cb?")
     mcp_code = _query_param(redirect, "code")
 
@@ -125,10 +127,10 @@ async def test_full_happy_path(provider):
     assert access is not None and access.scopes == ["mcp"]
 
 
-async def test_user_not_in_guild_is_403(tmp_db):
+async def test_user_not_in_guild_is_access_denied(tmp_db):
     conn = db.open_db(tmp_db)
     db.init_auth_schema(conn)
-    store = AuthStorage(conn)
+    store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config(guild_id="G1")
     p = DiscordOAuthProvider(
         cfg,
@@ -140,49 +142,95 @@ async def test_user_not_in_guild_is_403(tmp_db):
 
     discord_url = await p.authorize(client, _make_params())
     state = _query_param(discord_url, "state")
+    pending = await p.take_pending_for_state(state)
+    assert pending is not None
 
     with pytest.raises(CallbackError) as exc:
-        await p.complete_discord_callback(code="x", signed_state=state)
-    assert exc.value.status_code == 403
+        await p.complete_discord_callback(pending=pending, code="x")
+    assert exc.value.error == "access_denied"
 
 
-async def test_invalid_state_rejected(provider):
-    with pytest.raises(CallbackError) as exc:
-        await provider.complete_discord_callback(code="x", signed_state="not-a-real-token")
-    assert exc.value.status_code == 400
+async def test_invalid_state_returns_none(provider):
+    assert await provider.take_pending_for_state("not-a-real-token") is None
 
 
-async def test_refresh_rotates_tokens(provider):
+async def _issue_pair(provider):
     client = await provider.get_client("client-1")
     discord_url = await provider.authorize(client, _make_params())
     state = _query_param(discord_url, "state")
-    redirect = await provider.complete_discord_callback(code="x", signed_state=state)
+    pending = await provider.take_pending_for_state(state)
+    redirect = await provider.complete_discord_callback(pending=pending, code="x")
     mcp_code = _query_param(redirect, "code")
     auth_code = await provider.load_authorization_code(client, mcp_code)
-    first = await provider.exchange_authorization_code(client, auth_code)
+    return client, await provider.exchange_authorization_code(client, auth_code)
 
+
+async def test_refresh_rotates_tokens(provider):
+    client, first = await _issue_pair(provider)
     rt = await provider.load_refresh_token(client, first.refresh_token)
     assert rt is not None
     second = await provider.exchange_refresh_token(client, rt, ["mcp"])
     assert second.access_token != first.access_token
     assert second.refresh_token != first.refresh_token
 
-    # Old refresh token is now invalid.
+    # Old refresh AND old access tokens (same grant) are invalidated.
     assert await provider.load_refresh_token(client, first.refresh_token) is None
+    assert await provider.load_access_token(first.access_token) is None
 
 
 async def test_refresh_widening_scope_rejected(provider):
-    client = await provider.get_client("client-1")
-    discord_url = await provider.authorize(client, _make_params())
-    state = _query_param(discord_url, "state")
-    redirect = await provider.complete_discord_callback(code="x", signed_state=state)
-    mcp_code = _query_param(redirect, "code")
-    auth_code = await provider.load_authorization_code(client, mcp_code)
-    first = await provider.exchange_authorization_code(client, auth_code)
+    client, first = await _issue_pair(provider)
     rt = await provider.load_refresh_token(client, first.refresh_token)
-
     with pytest.raises(TokenError):
         await provider.exchange_refresh_token(client, rt, ["mcp", "admin"])
+
+
+async def test_revoke_access_kills_refresh(provider):
+    from mcp.server.auth.provider import AccessToken as SDKAccessToken
+
+    _, first = await _issue_pair(provider)
+    stored = await provider.load_access_token(first.access_token)
+    assert stored is not None
+    await provider.revoke_token(SDKAccessToken(
+        token=first.access_token, client_id=stored.client_id, scopes=stored.scopes,
+        expires_at=stored.expires_at,
+    ))
+    # Both halves of the grant are gone.
+    assert await provider.load_access_token(first.access_token) is None
+    client = await provider.get_client("client-1")
+    assert await provider.load_refresh_token(client, first.refresh_token) is None
+
+
+async def test_guild_pagination(tmp_db):
+    """User's target guild is on the second page; should still be admitted."""
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+    cfg = _make_config(guild_id="TARGET")
+
+    page1 = [{"id": f"G{i}"} for i in range(200)]
+    page2 = [{"id": "TARGET"}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/oauth2/token":
+            return httpx.Response(200, json={
+                "access_token": "discord-access", "refresh_token": "r", "expires_in": 3600,
+            })
+        if request.url.path == "/api/users/@me":
+            return httpx.Response(200, json={"id": "U1", "username": "alice"})
+        if request.url.path == "/api/users/@me/guilds":
+            after = request.url.params.get("after")
+            return httpx.Response(200, json=page2 if after else page1)
+        return httpx.Response(404, json={"error": "unexpected"})
+
+    p = DiscordOAuthProvider(cfg, store, http_client_factory=_httpx_factory(handler))
+    await store.save_client(_make_client())
+    client = await store.get_client("client-1")
+    discord_url = await p.authorize(client, _make_params())
+    state = _query_param(discord_url, "state")
+    pending = await p.take_pending_for_state(state)
+    redirect = await p.complete_discord_callback(pending=pending, code="x")
+    assert "code=" in redirect
 
 
 def _query_param(url: str, key: str) -> str:

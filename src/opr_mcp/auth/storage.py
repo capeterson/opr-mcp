@@ -7,6 +7,7 @@ shared sqlite connection is single-threaded.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import secrets
@@ -14,7 +15,16 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from cryptography.fernet import Fernet
 from mcp.shared.auth import OAuthClientInformationFull
+
+
+def _derive_fernet_key(secret: str) -> bytes:
+    return base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+
+
+def new_grant_id() -> str:
+    return secrets.token_urlsafe(16)
 
 
 def hash_token(token: str) -> str:
@@ -59,6 +69,7 @@ class StoredAuthCode:
 @dataclass
 class StoredAccessToken:
     token: str
+    grant_id: str
     client_id: str
     discord_user_id: str
     scopes: list[str]
@@ -69,6 +80,7 @@ class StoredAccessToken:
 @dataclass
 class StoredRefreshToken:
     token: str
+    grant_id: str
     client_id: str
     discord_user_id: str
     scopes: list[str]
@@ -79,28 +91,38 @@ PENDING_TTL_SECONDS = 600
 
 
 class AuthStorage:
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: sqlite3.Connection, *, fernet_key_secret: str):
         self._conn = conn
+        self._cipher = Fernet(_derive_fernet_key(fernet_key_secret))
 
     # --- clients ---
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         row = self._conn.execute(
-            "SELECT info_json FROM oauth_clients WHERE client_id = ?",
+            "SELECT info_json, client_secret_enc FROM oauth_clients WHERE client_id = ?",
             (client_id,),
         ).fetchone()
         if not row:
             return None
-        return OAuthClientInformationFull.model_validate_json(row["info_json"])
+        info = OAuthClientInformationFull.model_validate_json(row["info_json"])
+        if row["client_secret_enc"]:
+            decrypted = self._cipher.decrypt(row["client_secret_enc"]).decode("utf-8")
+            info = info.model_copy(update={"client_secret": decrypted})
+        return info
 
     async def save_client(self, info: OAuthClientInformationFull) -> None:
         if info.client_id is None:
             raise ValueError("client_id is required to save a client")
-        secret_hash = hash_token(info.client_secret) if info.client_secret else None
+        if info.client_secret:
+            ciphertext: bytes | None = self._cipher.encrypt(info.client_secret.encode("utf-8"))
+            redacted = info.model_copy(update={"client_secret": None})
+        else:
+            ciphertext = None
+            redacted = info
         self._conn.execute(
-            "INSERT OR REPLACE INTO oauth_clients (client_id, client_secret_hash, info_json, issued_at) "
+            "INSERT OR REPLACE INTO oauth_clients (client_id, client_secret_enc, info_json, issued_at) "
             "VALUES (?, ?, ?, ?)",
-            (info.client_id, secret_hash, info.model_dump_json(), now()),
+            (info.client_id, ciphertext, redacted.model_dump_json(), now()),
         )
         self._conn.commit()
 
@@ -202,10 +224,11 @@ class AuthStorage:
 
     async def save_access_token(self, t: StoredAccessToken) -> None:
         self._conn.execute(
-            "INSERT INTO oauth_access_tokens (token_hash, client_id, discord_user_id, scopes_json, resource, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO oauth_access_tokens (token_hash, grant_id, client_id, discord_user_id, scopes_json, resource, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 hash_token(t.token),
+                t.grant_id,
                 t.client_id,
                 t.discord_user_id,
                 json.dumps(t.scopes),
@@ -226,6 +249,7 @@ class AuthStorage:
             return None
         return StoredAccessToken(
             token=token,
+            grant_id=row["grant_id"],
             client_id=row["client_id"],
             discord_user_id=row["discord_user_id"],
             scopes=json.loads(row["scopes_json"]),
@@ -233,18 +257,15 @@ class AuthStorage:
             expires_at=row["expires_at"],
         )
 
-    async def revoke_access_token(self, token: str) -> None:
-        self._conn.execute("DELETE FROM oauth_access_tokens WHERE token_hash = ?", (hash_token(token),))
-        self._conn.commit()
-
     # --- refresh tokens ---
 
     async def save_refresh_token(self, t: StoredRefreshToken) -> None:
         self._conn.execute(
-            "INSERT INTO oauth_refresh_tokens (token_hash, client_id, discord_user_id, scopes_json, expires_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO oauth_refresh_tokens (token_hash, grant_id, client_id, discord_user_id, scopes_json, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 hash_token(t.token),
+                t.grant_id,
                 t.client_id,
                 t.discord_user_id,
                 json.dumps(t.scopes),
@@ -264,13 +285,22 @@ class AuthStorage:
             return None
         return StoredRefreshToken(
             token=token,
+            grant_id=row["grant_id"],
             client_id=row["client_id"],
             discord_user_id=row["discord_user_id"],
             scopes=json.loads(row["scopes_json"]),
             expires_at=row["expires_at"],
         )
 
-    async def revoke_refresh_token(self, token: str) -> None:
+    # --- grant-level revocation (kills both halves of an issued pair) ---
+
+    async def revoke_grant(self, grant_id: str) -> None:
+        self._conn.execute("DELETE FROM oauth_access_tokens WHERE grant_id = ?", (grant_id,))
+        self._conn.execute("DELETE FROM oauth_refresh_tokens WHERE grant_id = ?", (grant_id,))
+        self._conn.commit()
+
+    async def revoke_refresh_token_only(self, token: str) -> None:
+        """Remove a single refresh token (used during refresh-rotation, not for revocation)."""
         self._conn.execute("DELETE FROM oauth_refresh_tokens WHERE token_hash = ?", (hash_token(token),))
         self._conn.commit()
 

@@ -81,23 +81,34 @@ class DiscordOAuthProvider(
             state=signed_state,
         )
 
-    # Called by the /discord/callback custom route after a successful Discord
-    # round-trip. Returns the redirect URL for the MCP client.
+    async def take_pending_for_state(
+        self, signed_state: str
+    ) -> storage.PendingAuthorization | None:
+        """Decode the Discord-callback state and consume the pending authorization.
+
+        Returns ``None`` when the state is unsigned/expired or the pending row
+        is gone. The caller (route handler) decides between a plaintext 4xx
+        response (no client to redirect to) and an OAuth error redirect.
+        """
+        try:
+            pending_id = self._signer.loads(signed_state, max_age=STATE_MAX_AGE)
+        except BadSignature:
+            return None
+        return await self._store.take_pending(pending_id)
+
     async def complete_discord_callback(
         self,
         *,
+        pending: storage.PendingAuthorization,
         code: str,
-        signed_state: str,
     ) -> str:
-        try:
-            pending_id = self._signer.loads(signed_state, max_age=STATE_MAX_AGE)
-        except BadSignature as exc:
-            raise CallbackError(400, "invalid or expired state") from exc
+        """Exchange the Discord auth code, check guild membership, mint an MCP code.
 
-        pending = await self._store.take_pending(pending_id)
-        if not pending:
-            raise CallbackError(400, "authorization request not found or expired")
-
+        Returns a redirect URL back to the original MCP client with ``code``
+        and ``state``. Raises :class:`CallbackError` on any Discord-side or
+        authorization failure; the caller is expected to convert that into an
+        OAuth error redirect to the client's ``redirect_uri``.
+        """
         async with self._http_factory() as http:
             try:
                 tokens = await discord.exchange_code(
@@ -108,19 +119,21 @@ class DiscordOAuthProvider(
                     code=code,
                 )
                 user = await discord.fetch_user(http, tokens.access_token)
-                guild_ids = await discord.fetch_guild_ids(http, tokens.access_token)
+                in_guild = await discord.user_is_in_guild(
+                    http, tokens.access_token, self._config.discord_guild_id
+                )
             except discord.DiscordError as exc:
                 log.warning("Discord auth failed: %s", exc)
-                raise CallbackError(502, "Discord authentication failed") from exc
+                raise CallbackError("server_error", "Discord authentication failed") from exc
 
-        if self._config.discord_guild_id not in guild_ids:
+        if not in_guild:
             log.info(
                 "Rejecting Discord user %s — not a member of guild %s",
                 user.get("id"),
                 self._config.discord_guild_id,
             )
             raise CallbackError(
-                403,
+                "access_denied",
                 "Your Discord account is not a member of the required server.",
             )
 
@@ -202,10 +215,11 @@ class DiscordOAuthProvider(
         stored = await self._store.load_refresh_token(refresh_token.token)
         if not stored or stored.client_id != client.client_id:
             raise TokenError("invalid_grant", "refresh token not found")
-        await self._store.revoke_refresh_token(refresh_token.token)
         new_scopes = scopes if scopes else stored.scopes
         if not set(new_scopes).issubset(set(stored.scopes)):
             raise TokenError("invalid_scope", "requested scopes exceed original grant")
+        # Rotate: kill the entire prior grant (old access + old refresh) and issue a fresh pair.
+        await self._store.revoke_grant(stored.grant_id)
         return await self._issue_tokens(
             client_id=stored.client_id,
             discord_user_id=stored.discord_user_id,
@@ -228,10 +242,16 @@ class DiscordOAuthProvider(
         )
 
     async def revoke_token(self, token: Any) -> None:
+        # Per RFC 7009 + MCP guidance: revoke the entire grant so the paired
+        # refresh/access token cannot mint a replacement.
         if isinstance(token, AccessToken):
-            await self._store.revoke_access_token(token.token)
+            stored = await self._store.load_access_token(token.token)
         elif isinstance(token, RefreshToken):
-            await self._store.revoke_refresh_token(token.token)
+            stored = await self._store.load_refresh_token(token.token)
+        else:
+            return
+        if stored is not None:
+            await self._store.revoke_grant(stored.grant_id)
 
     # --- helper ---
 
@@ -243,6 +263,7 @@ class DiscordOAuthProvider(
         scopes: list[str],
         resource: str | None,
     ) -> OAuthToken:
+        grant_id = storage.new_grant_id()
         access = storage.new_token()
         refresh = storage.new_token()
         access_expires = storage.now() + self._config.access_token_ttl
@@ -250,6 +271,7 @@ class DiscordOAuthProvider(
         await self._store.save_access_token(
             storage.StoredAccessToken(
                 token=access,
+                grant_id=grant_id,
                 client_id=client_id,
                 discord_user_id=discord_user_id,
                 scopes=scopes,
@@ -260,6 +282,7 @@ class DiscordOAuthProvider(
         await self._store.save_refresh_token(
             storage.StoredRefreshToken(
                 token=refresh,
+                grant_id=grant_id,
                 client_id=client_id,
                 discord_user_id=discord_user_id,
                 scopes=scopes,
@@ -276,9 +299,15 @@ class DiscordOAuthProvider(
 
 
 class CallbackError(Exception):
-    """Raised inside the Discord callback handler to surface an HTTP error."""
+    """Raised by the provider during the Discord round-trip.
 
-    def __init__(self, status_code: int, message: str):
-        super().__init__(message)
-        self.status_code = status_code
-        self.message = message
+    Carries an OAuth 2.0 error code (``access_denied``, ``server_error``, ...)
+    and a human-readable description. The custom Starlette route catches this
+    and rewrites it into an OAuth error redirect to the MCP client's
+    ``redirect_uri`` so the client doesn't hang waiting for a callback.
+    """
+
+    def __init__(self, error: str, description: str):
+        super().__init__(description)
+        self.error = error
+        self.description = description
