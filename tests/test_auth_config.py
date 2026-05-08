@@ -43,6 +43,7 @@ def test_loopback_http_accepted(monkeypatch):
         "http://localhost.example.com",          # spoofed prefix
         "http://127.0.0.1.evil.test",            # spoofed prefix
         "ftp://opr.example.com",                 # wrong scheme
+        "http://[::1]:8765",                     # IPv6 loopback: SDK doesn't accept it
     ],
 )
 def test_unacceptable_urls_rejected(monkeypatch, url):

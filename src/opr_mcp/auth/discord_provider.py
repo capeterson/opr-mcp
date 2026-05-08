@@ -285,11 +285,19 @@ class DiscordOAuthProvider(
         grant_id = storage.new_grant_id()
         access = storage.new_token()
         refresh = storage.new_token()
-        access_expires = storage.now() + self._config.access_token_ttl
         # Initial issuance: now + REFRESH_TOKEN_TTL.
         # Refresh rotation: caller passes the existing absolute deadline, so the
         # grant cannot be extended indefinitely.
-        refresh_expires = refresh_expires_at if refresh_expires_at is not None else storage.now() + self._config.refresh_token_ttl
+        refresh_expires = (
+            refresh_expires_at
+            if refresh_expires_at is not None
+            else storage.now() + self._config.refresh_token_ttl
+        )
+        # Cap the access-token expiry at the grant deadline so a refresh issued
+        # one second before the refresh deadline cannot mint an access token
+        # valid past the grant.
+        access_expires = min(storage.now() + self._config.access_token_ttl, refresh_expires)
+        expires_in = max(0, access_expires - storage.now())
         await self._store.save_access_token(
             storage.StoredAccessToken(
                 token=access,
@@ -315,7 +323,7 @@ class DiscordOAuthProvider(
         return OAuthToken(
             access_token=access,
             token_type="Bearer",
-            expires_in=self._config.access_token_ttl,
+            expires_in=expires_in,
             scope=" ".join(scopes) if scopes else None,
             refresh_token=refresh,
         )

@@ -305,6 +305,44 @@ async def test_refresh_preserves_resource_binding(tmp_db):
     assert issued2.resource == "https://opr.example.com/mcp"
 
 
+async def test_refresh_caps_access_token_at_grant_deadline(tmp_db):
+    """A refresh issued near the grant deadline must not produce an access token
+    that outlives the grant. Otherwise the non-sliding bound is meaningless."""
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+    # 1h access TTL, 60s refresh TTL — refresh deadline arrives first.
+    cfg = AuthConfig(
+        public_url="https://opr.example.com",
+        discord_client_id="dc",
+        discord_client_secret="ds",
+        discord_guild_id="G1",
+        auth_secret="test-secret-12345678901234567890",
+        access_token_ttl=3600,
+        refresh_token_ttl=60,
+    )
+    p = DiscordOAuthProvider(cfg, store, http_client_factory=_httpx_factory(_discord_handler_ok()))
+    await store.save_client(_make_client())
+    client = await store.get_client("client-1")
+
+    discord_url = await p.authorize(client, _make_params())
+    pending = await p.take_pending_for_state(_query_param(discord_url, "state"))
+    redirect = await p.complete_discord_callback(pending=pending, code="x")
+    auth_code = await p.load_authorization_code(client, _query_param(redirect, "code"))
+    first = await p.exchange_authorization_code(client, auth_code)
+
+    rt = await p.load_refresh_token(client, first.refresh_token)
+    rotated = await p.exchange_refresh_token(client, rt, ["mcp"])
+
+    rotated_access = await p.load_access_token(rotated.access_token)
+    rotated_refresh = await p.load_refresh_token(client, rotated.refresh_token)
+    # Rotated access token cannot outlive the (preserved) grant deadline.
+    assert rotated_access.expires_at <= rotated_refresh.expires_at
+    # The OAuth response's expires_in is bounded by the grant deadline as well,
+    # not the larger access_token_ttl.
+    assert rotated.expires_in <= cfg.refresh_token_ttl
+
+
 def _query_param(url: str, key: str) -> str:
     from urllib.parse import parse_qs, urlparse
 

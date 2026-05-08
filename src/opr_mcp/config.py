@@ -84,7 +84,12 @@ def http_port() -> int:
     return _int_env("OPR_MCP_PORT", DEFAULT_HTTP_PORT)
 
 
-_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+# Hostnames we allow over plain HTTP for local development.
+# This intentionally matches the MCP SDK's ``validate_issuer_url`` allow-list
+# (locked to mcp 1.27.0): only ``localhost`` and ``127.0.0.1`` are accepted as
+# HTTP issuers. Adding ``::1`` here would pass our check but crash the SDK at
+# server-start, so we leave it out.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 
 def _is_acceptable_public_url(url: str) -> bool:
@@ -103,7 +108,7 @@ def load_auth_config() -> AuthConfig:
         raise ConfigError("OPR_MCP_PUBLIC_URL is required when OPR_MCP_AUTH_ENABLED=true")
     if not _is_acceptable_public_url(public_url):
         raise ConfigError(
-            "OPR_MCP_PUBLIC_URL must be https:// (http:// is only allowed when the host is localhost, 127.0.0.1, or ::1)"
+            "OPR_MCP_PUBLIC_URL must be https:// (http:// is only allowed when the host is localhost or 127.0.0.1)"
         )
 
     required = {

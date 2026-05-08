@@ -45,7 +45,7 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     if with_auth is None:
         return FastMCP("opr", host=http_host(), port=http_port())
 
-    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
     from pydantic import AnyHttpUrl
 
     from .auth.discord_provider import DiscordOAuthProvider
@@ -57,6 +57,13 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     global _auth_provider
     _auth_provider = DiscordOAuthProvider(with_auth, store)
 
+    # NOTE: We deliberately do not enable RevocationOptions. The MCP 1.27.0
+    # SDK's RevocationHandler treats ``client_secret`` as a required form
+    # field on the request body, which breaks RFC 7009 / 6749 clients that
+    # registered with ``client_secret_basic`` and pass their secret in the
+    # Authorization header. Operators who need to evict a session can wipe
+    # ``oauth_access_tokens`` + ``oauth_refresh_tokens`` directly (see
+    # README "Remote deployment with Discord OAuth" notes).
     auth_settings = AuthSettings(
         issuer_url=AnyHttpUrl(with_auth.public_url),
         resource_server_url=AnyHttpUrl(with_auth.public_url),
@@ -66,7 +73,6 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
             valid_scopes=["mcp"],
             default_scopes=["mcp"],
         ),
-        revocation_options=RevocationOptions(enabled=True),
     )
     return FastMCP(
         "opr",
