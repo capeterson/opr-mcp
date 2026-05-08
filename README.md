@@ -108,6 +108,74 @@ The default `CMD` is `serve`, which honors `OPR_MCP_PDF_DIR=/data/pdfs` and
 `OPR_MCP_WATCH=1` (both set in the image). To use it with Claude Desktop /
 Claude Code, point your MCP config at `docker run … ghcr.io/capeterson/opr-mcp:dev`.
 
+## Remote deployment with Discord OAuth
+
+You can run opr-mcp as a publicly-reachable HTTP MCP server and gate
+connections behind Discord OAuth, restricted to members of a specific Discord
+server (guild). The MCP server itself acts as an OAuth 2.1 authorization
+server (per the MCP spec) and delegates user identity to Discord.
+
+### 1. Create a Discord application
+
+1. Visit <https://discord.com/developers/applications> and create a new app.
+2. Under **OAuth2 → General**, copy the **Client ID** and **Client Secret**.
+3. Add a redirect URL: `https://YOUR-PUBLIC-HOST/discord/callback`.
+4. Find the **Guild ID** of the Discord server you want to restrict access to
+   (enable Developer Mode in Discord, right-click the server, "Copy Server ID").
+
+### 2. Set environment variables
+
+```bash
+export OPR_MCP_AUTH_ENABLED=true
+export OPR_MCP_PUBLIC_URL="https://opr.example.com"   # how the world reaches you (https only, except for localhost)
+export OPR_MCP_DISCORD_CLIENT_ID="..."
+export OPR_MCP_DISCORD_CLIENT_SECRET="..."
+export OPR_MCP_DISCORD_GUILD_ID="123456789012345678"
+export OPR_MCP_AUTH_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+# Optional:
+export OPR_MCP_HOST=0.0.0.0          # default 127.0.0.1
+export OPR_MCP_PORT=8765             # default 8765
+export OPR_MCP_AUTH_TOKEN_TTL=3600   # access token TTL (sec); default 1h
+export OPR_MCP_REFRESH_TOKEN_TTL=2592000   # refresh token TTL; default 30d
+```
+
+### 3. Run the server
+
+```bash
+uv run opr-mcp serve --transport http
+```
+
+Put a TLS-terminating reverse proxy (Caddy, nginx, Cloudflare) in front of it on
+`OPR_MCP_PUBLIC_URL` — Discord requires HTTPS for non-localhost redirect URIs.
+
+### 4. Connect a client
+
+The MCP server publishes OAuth metadata at:
+
+```
+https://opr.example.com/.well-known/oauth-authorization-server
+```
+
+MCP clients that support OAuth (with dynamic client registration) will discover
+the server and walk users through the Discord login. After Discord auth, the
+server checks `OPR_MCP_DISCORD_GUILD_ID` membership and either issues a bearer
+token or rejects with HTTP 403.
+
+Notes:
+
+- Tokens are stored as SHA-256 hashes; client secrets are encrypted at rest
+  with a key derived from `OPR_MCP_AUTH_SECRET` via Fernet.
+- Access and refresh tokens issued in the same exchange share a `grant_id`,
+  so revoking either one removes both halves of the pair.
+- Guild membership is checked at token-issue time only. Token TTL bounds the
+  revocation lag — to evict everyone immediately, lower
+  `OPR_MCP_AUTH_TOKEN_TTL`, or wipe both tables:
+  `sqlite3 opr.db "DELETE FROM oauth_access_tokens; DELETE FROM oauth_refresh_tokens;"`.
+  Deleting only the access-token table leaves refresh tokens able to mint
+  fresh access tokens, so don't skip the second statement.
+- With `OPR_MCP_AUTH_ENABLED` unset, `serve` behaves exactly as before (stdio,
+  no auth) — ideal for local Claude Desktop use.
+
 ## Tests
 
 ```bash
