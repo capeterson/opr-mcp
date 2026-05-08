@@ -100,6 +100,76 @@ def test_parse_unit_captures_lone_non_parametric_rule_after_weapon():
     assert "Hero" in u.rules
 
 
+def test_parse_unit_equipment_name_with_lowercase_connector():
+    """Real weapon names like 'Spear of War' must parse, not be lost as rules."""
+    s = _section(
+        "Champion of War [1] - 120pts\n"
+        "Quality 3+   Defense 4+\n"
+        "Spear of War (A3, AP(1))\n"
+        "Banner of the King (A1)\n"
+        "Hero, Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Spear of War", "Banner of the King"}.issubset(eq_names), eq_names
+    # And those names must NOT have leaked into rules.
+    assert "Spear of War (A3" not in u.rules
+    assert all("Spear" not in r for r in u.rules)
+
+
+def test_parse_unit_keeps_standalone_non_attack_equipment_line():
+    """Defensive gear on its own line after a weapon is preserved."""
+    s = _section(
+        "Shield Bearer [1] - 90pts\n"
+        "Quality 3+   Defense 3+\n"
+        "CCW (A2)\n"
+        "Combat Shield (Shield Wall)\n"
+        "Hero, Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"CCW", "Combat Shield"}.issubset(eq_names), eq_names
+
+
+def test_parse_unit_rejects_rule_token_on_weapon_line():
+    """A parametric rule next to a weapon must NOT slip into equipment."""
+    s = _section(
+        "Brute [1] - 75pts\n"
+        "Quality 4+   Defense 4+\n"
+        "CCW (A2), Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    # Tough is a rule, not equipment. Whether the line is salvaged as either
+    # is up to the parser; the invariant is that Tough never ends up listed
+    # as equipment.
+    assert "Tough" not in eq_names
+
+
+def test_parse_unit_skips_section_heading_as_rule():
+    """A standalone 'Upgrades' / 'Options' heading must not pollute rules."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "Upgrades\n"
+        "Options\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_names_lower = {r.lower() for r in u.rules}
+    assert "upgrades" not in rule_names_lower
+    assert "options" not in rule_names_lower
+
+
 def test_parse_unit_inline_comma_joined_weapons():
     """Multiple weapons on a single comma-joined line."""
     s = _section(
