@@ -677,6 +677,96 @@ def test_parse_unit_skips_melee_ranged_table_label():
     assert "melee weapons" not in rule_set
 
 
+def test_parse_unit_skips_combined_equipment_rules_table_header():
+    """``Equipment Special Rules`` combined column header must be skipped."""
+    s = _section(
+        "Squad [5] - 100pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Equipment Special Rules\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    assert "equipment" not in rule_set
+    assert "equipment special rules" not in rule_set
+
+
+def test_parse_unit_all_caps_in_profile_label_does_not_terminate():
+    """In-card column labels in CAPS (``EQUIPMENT``) should NOT terminate."""
+    s = _section(
+        "Squad [5] - 90pts\n"
+        "Quality 4+   Defense 5+\n"
+        "EQUIPMENT\n"
+        "Rifle (24\", A1)\n"
+        "WEAPONS\n"
+        "CCW (A1)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    # All-caps EQUIPMENT/WEAPONS column labels skip but don't terminate.
+    assert {"Rifle", "CCW"}.issubset(eq_names), eq_names
+
+
+def test_parse_unit_pre_stats_paren_flavor_does_not_anchor_gear():
+    """``Veteran Warriors (Elite)`` BEFORE Q/D must not be captured as gear."""
+    s = _section(
+        "Veteran Warriors (Elite)\n"
+        "Battle Brothers [5] - 90pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Veteran Warriors" not in eq_names, eq_names
+    assert "Rifle" in eq_names, eq_names
+
+
+def test_parse_unit_multi_word_textual_param_routes_to_rules():
+    """Multi-word custom rule names like ``Command Aura(Friendly)`` route to rules."""
+    s = _section(
+        "Commander [1] - 120pts\n"
+        "Quality 3+   Defense 4+\n"
+        "CCW (A2)\n"
+        "Command Aura(Friendly), Beacon Signal(Allies)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Command Aura(Friendly)" in rule_set, u.rules
+    assert "Beacon Signal(Allies)" in rule_set, u.rules
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Command Aura" not in eq_names
+    assert "Beacon Signal" not in eq_names
+
+
+def test_parse_unit_single_word_boundary_with_inline_content():
+    """``Upgrades Plasma Pistol (12", A1)`` glued line terminates the scan."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "Upgrades Plasma Pistol (12\", A1, AP(2))\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    # Plasma Pistol from the glued upgrade row must NOT appear in equipment.
+    assert "Plasma Pistol" not in eq_names, eq_names
+    assert "Rifle" in eq_names, eq_names
+
+
 def test_parse_unit_strips_count_prefix_on_rule_tokens():
     """Per-model count prefix on rules ('10x Furious') must be tolerated."""
     s = _section(

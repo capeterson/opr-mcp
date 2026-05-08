@@ -68,6 +68,8 @@ _TABLE_HEADER_WORDS = frozenset({
     "atk", "att", "ap", "special", "specials", "spe", "stat",
     "stats", "qty", "points", "pts", "quality", "defense",
     "tough",
+    # Combined-card column headers like "Equipment Special Rules"
+    "equipment", "rule", "rules",
 })
 # Hard boundaries: headings that always come AFTER a unit's profile in real
 # OPR army books (upgrade tables, army-wide rules, spell lists). Encountering
@@ -95,7 +97,14 @@ _INPROFILE_HEADINGS = frozenset({
     "wargear", "armory", "armoury", "loadout",
     "melee", "ranged", "melee weapons", "ranged weapons",
 })
-# Common OPR rule names. Used to disambiguate textual-param paren lists:
+# ALL-CAPS in-profile heading variants that DO terminate the scan. These are
+# glossary-banner-like headings that, when printed in upper case, indicate a
+# trailing rules block. Other in-profile labels printed all-caps (e.g.
+# ``EQUIPMENT`` / ``WEAPONS`` as unit-card column headers) are NOT
+# boundaries — they should still skip-but-continue.
+_ALL_CAPS_BOUNDARY_HEADINGS = frozenset({
+    "special rules", "rules",
+})
 # ``Horse (Fast), Cloak (Stealth)`` is a list of rule-granting gear (every
 # body matches a known rule), while ``Aura(Friendly), Beacon(Allies)`` is a
 # list of custom textual-param rules (no body matches).
@@ -125,20 +134,22 @@ def _normalize_heading(line: str) -> str:
 def _is_profile_boundary(line: str) -> bool:
     """True if ``line`` is a heading that ends the unit's profile scan.
 
-    Multi-word headings also match by prefix so a glued line like
-    ``ARMY-WIDE SPECIAL RULE Repel Ambushers: ...`` (or with a colon
-    after the heading) still terminates — PDF extraction sometimes
-    joins the heading and the first rule onto a single line.
+    Headings also match by prefix (with a trailing space or colon) so a
+    glued line like ``ARMY-WIDE SPECIAL RULE Repel Ambushers: ...`` or
+    ``Upgrades Plasma Pistol (12", A1)`` still terminates — PDF
+    extraction sometimes joins the heading and the first row onto a
+    single line.
 
-    An in-profile label like ``Special Rules`` printed in ALL CAPS
-    (``SPECIAL RULES``) is treated as a hard boundary too: the all-caps
-    form is the typical glossary banner, not a unit-card column header.
+    A glossary banner printed in ALL CAPS (``SPECIAL RULES``) is also a
+    hard boundary. Other in-profile labels in ALL CAPS (``EQUIPMENT`` /
+    ``WEAPONS`` as unit-card column headers) are NOT boundaries; they
+    still skip-but-continue.
     """
     norm = _normalize_heading(line)
     if norm in _PROFILE_BOUNDARY_HEADINGS:
         return True
     if any(
-        " " in h and (norm.startswith(h + " ") or norm.startswith(h + ":"))
+        norm.startswith(h + " ") or norm.startswith(h + ":")
         for h in _PROFILE_BOUNDARY_HEADINGS
     ):
         return True
@@ -147,7 +158,7 @@ def _is_profile_boundary(line: str) -> bool:
         stripped
         and stripped.upper() == stripped
         and any(c.isalpha() for c in stripped)
-        and norm in _INPROFILE_HEADINGS
+        and norm in _ALL_CAPS_BOUNDARY_HEADINGS
     )
 
 
@@ -325,10 +336,9 @@ def _parse_paren_line(line: str) -> tuple[list[dict], list[str]] | None:
         len(raw_paren_items) >= 2
         and not any(_WEAPON_ATTACKS_RE.search(b) for _, b in raw_paren_items)
         and all(
-            " " not in n.strip()
-            and "(" not in b
+            "(" not in b
             and re.fullmatch(r"[A-Za-z]+", b.strip()) is not None
-            for n, b in raw_paren_items
+            for _, b in raw_paren_items
         )
         and not any(
             b.strip().lower() in _COMMON_RULE_NAMES
@@ -568,7 +578,14 @@ def parse_unit(section: Section) -> ParsedUnit | None:
             has_weapon = any(
                 _WEAPON_ATTACKS_RE.search(it["details"]) for it in paren_eq
             )
-            if has_weapon or paren_rules or in_stat_block:
+            # Pre-stats acceptance requires a definite local signal on
+            # this line (a weapon or a parametric/bare rule). Without it
+            # a parenthesized subtitle like ``Veteran Warriors (Elite)``
+            # before the Q/D row would otherwise be captured as gear
+            # just because some later line in the section anchored
+            # ``in_stat_block``.
+            has_local_signal = has_weapon or bool(paren_rules)
+            if has_local_signal or (past_stats_line and in_stat_block):
                 for it in paren_eq:
                     _add_equipment(it)
                 for r in paren_rules:
