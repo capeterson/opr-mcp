@@ -837,6 +837,113 @@ def test_parse_unit_special_rules_heading_then_textual_param():
     assert "Aura" not in eq_names
 
 
+def test_parse_unit_all_caps_rules_banner_with_inline_content():
+    """``SPECIAL RULES: Furious - ...`` glued banner terminates the scan."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "SPECIAL RULES: Furious - Charging unit gets +1 attack\n"
+        "Deadly\n"
+        "Impact\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    assert "deadly" not in rule_set
+    assert "impact" not in rule_set
+
+
+def test_parse_unit_pre_stats_rules_prefix_with_single_rule():
+    """``Rules: Hero`` placed BEFORE the Q/D stat line is preserved."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Rules: Hero\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Hero" in u.rules
+
+
+def test_parse_unit_heading_word_in_equipment_name():
+    """``Psychic Staff (A2)`` keeps the full name, not just ``Staff``."""
+    s = _section(
+        "Wizard [1] - 100pts\n"
+        "Quality 3+   Defense 5+\n"
+        "Psychic Staff (A2)\n"
+        "Special Blade (A1)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Psychic Staff" in eq_names, eq_names
+    assert "Special Blade" in eq_names, eq_names
+    assert "Staff" not in eq_names
+    assert "Blade" not in eq_names
+
+
+def test_parse_unit_skips_single_word_table_header():
+    """Single-word table header (``Weapon``) on its own line is skipped."""
+    s = _section(
+        "Squad [5] - 100pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Weapon\n"
+        "Range\n"
+        "Attacks\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    assert "weapon" not in rule_set
+    assert "range" not in rule_set
+    assert "attacks" not in rule_set
+
+
+def test_parse_unit_single_textual_param_with_bare_rule_sibling():
+    """``Aura(Friendly), Hero`` — the single textual-param item routes to rules."""
+    s = _section(
+        "Beacon [1] - 60pts\n"
+        "Quality 4+   Defense 4+\n"
+        "CCW (A1)\n"
+        "Aura(Friendly), Hero\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Aura(Friendly)" in rule_set, u.rules
+    assert "Hero" in rule_set
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Aura" not in eq_names
+
+
+def test_parse_unit_pre_stats_flavor_phrase_not_stored_as_rules():
+    """``Veteran Warriors, Expert Marksmen`` BEFORE Q/D must NOT become rules."""
+    s = _section(
+        "Veteran Warriors, Expert Marksmen\n"
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Veteran Warriors" not in rule_set
+    assert "Expert Marksmen" not in rule_set
+
+
 def test_parse_unit_strips_count_prefix_on_rule_tokens():
     """Per-model count prefix on rules ('10x Furious') must be tolerated."""
     s = _section(

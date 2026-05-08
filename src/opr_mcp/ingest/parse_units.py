@@ -105,6 +105,10 @@ _INPROFILE_HEADINGS = frozenset({
 _ALL_CAPS_BOUNDARY_HEADINGS = frozenset({
     "special rules", "rules",
 })
+# Leading run of uppercase letters / spaces / hyphens at the start of a
+# line. Used to detect ALL-CAPS heading prefixes even when the rest of
+# the line has lowercase content (``SPECIAL RULES: Furious - ...``).
+_LEADING_UPPER_RE = re.compile(r"^([A-Z][A-Z \-]*)")
 # ``Horse (Fast), Cloak (Stealth)`` is a list of rule-granting gear (every
 # body matches a known rule), while ``Aura(Friendly), Beacon(Allies)`` is a
 # list of custom textual-param rules (no body matches).
@@ -153,13 +157,18 @@ def _is_profile_boundary(line: str) -> bool:
         for h in _PROFILE_BOUNDARY_HEADINGS
     ):
         return True
-    stripped = line.strip().rstrip(":")
-    return bool(
-        stripped
-        and stripped.upper() == stripped
-        and any(c.isalpha() for c in stripped)
-        and norm in _ALL_CAPS_BOUNDARY_HEADINGS
-    )
+    # ALL-CAPS leading prefix: extract the longest run of uppercase /
+    # space / hyphen at the start of the line and test it against the
+    # all-caps boundary set. Catches both standalone (``SPECIAL RULES``)
+    # and glued-content (``SPECIAL RULES: Furious - ...`` /
+    # ``SPECIAL RULES Furious``) forms.
+    stripped = line.strip()
+    m = _LEADING_UPPER_RE.match(stripped)
+    if m:
+        leading = m.group(1).strip().rstrip(":").strip().lower()
+        if leading and leading in _ALL_CAPS_BOUNDARY_HEADINGS:
+            return True
+    return False
 
 
 def _is_inprofile_heading(line: str) -> bool:
@@ -188,8 +197,14 @@ def _strip_inprofile_heading(line: str) -> tuple[str | None, str]:
     (empty when the heading is on its own line). Multi-word headings are
     matched first so ``Special Rules Hero`` strips ``Special Rules``,
     not ``Special``.
+
+    If the entire line parses as a clean ``Name(body)`` token
+    (e.g. ``Psychic Staff (A2)``), no stripping is performed — the
+    leading word is part of the gear name, not a heading prefix.
     """
     s = line.strip()
+    if _EQUIP_TOKEN_RE.fullmatch(s):
+        return None, s
     norm = s.lower()
     sorted_headings = sorted(_INPROFILE_HEADINGS, key=len, reverse=True)
     for h in sorted_headings:
@@ -254,7 +269,7 @@ def _is_table_header_line(line: str) -> bool:
     rules_json.
     """
     words = line.strip().split()
-    if not (2 <= len(words) <= 8):
+    if not (1 <= len(words) <= 8):
         return False
     for w in words:
         norm = w.lower().strip(":,()")
@@ -371,7 +386,9 @@ def _parse_paren_line(line: str) -> tuple[list[dict], list[str]] | None:
         and re.fullmatch(r"[A-Za-z]+", b.strip()) is not None
         and b.strip().lower() not in _COMMON_RULE_NAMES
     ]
-    if len(non_weapon_textual_param) >= 2:
+    if non_weapon_textual_param and (
+        len(non_weapon_textual_param) >= 2 or bare_rules
+    ):
         candidates = {(n, b) for n, b in non_weapon_textual_param}
         equipment = [
             it for it in equipment
@@ -578,6 +595,18 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         if _is_profile_boundary(s):
             break
 
+        # Explicit ``Rules:`` / ``Special:`` prefix is unambiguous and the
+        # only path that consumes a leading ``Rules:`` correctly — must
+        # run before the in-profile heading strip would otherwise turn
+        # ``Rules: Hero`` into a remainder ``Hero`` that hits the
+        # past_stats_line gate.
+        if s.startswith("Rules:") or s.startswith("Special:"):
+            for tok in re.split(r",|;", s.split(":", 1)[1]):
+                _add_rule(tok)
+            in_stat_block = True
+            in_rules_zone = True
+            continue
+
         # In-profile column header — possibly glued to its first row of
         # content (``Special Rules Hero`` / ``Weapons Rifle (24", A1)``).
         # Strip the heading, set/clear ``in_rules_zone``, and either skip
@@ -627,13 +656,23 @@ def parse_unit(section: Section) -> ParsedUnit | None:
                 _WEAPON_ATTACKS_RE.search(it["details"]) for it in paren_eq
             )
             # Pre-stats acceptance requires a definite local signal on
-            # this line (a weapon or a parametric/bare rule). Without it
-            # a parenthesized subtitle like ``Veteran Warriors (Elite)``
-            # before the Q/D row would otherwise be captured as gear
-            # just because some later line in the section anchored
+            # this line: a weapon, a parametric rule, or a bare rule
+            # token that's a recognized OPR rule name. Without that,
+            # parenthesized subtitle (``Veteran Warriors (Elite)``) and
+            # bare TitleCase flavor (``Veteran Warriors, Expert
+            # Marksmen``) before the Q/D row would otherwise be
+            # captured just because some later line anchored
             # ``in_stat_block``.
-            has_local_signal = has_weapon or bool(paren_rules)
-            if has_local_signal or (past_stats_line and in_stat_block):
+            has_known_rule_token = any(
+                "(" in r or r.strip().lower() in _COMMON_RULE_NAMES
+                for r in paren_rules
+            )
+            has_local_signal = has_weapon or has_known_rule_token
+            if (
+                has_local_signal
+                or in_rules_zone
+                or (past_stats_line and in_stat_block)
+            ):
                 for it in paren_eq:
                     _add_equipment(it)
                 for r in paren_rules:
@@ -642,19 +681,12 @@ def parse_unit(section: Section) -> ParsedUnit | None:
                     in_stat_block = True
                     continue
 
-        # Explicit ``Rules:`` / ``Special:`` prefix (older / synthetic
-        # format). The prefix is unambiguous, so this runs before the
-        # past_stats_line gate — a unit whose extraction puts the rule
-        # column above the Q/D line still has its rules picked up.
-        if s.startswith("Rules:") or s.startswith("Special:"):
-            for tok in re.split(r",|;", s.split(":", 1)[1]):
-                _add_rule(tok)
-            in_stat_block = True
-            continue
-
         # All other non-paren-line processing is gated on past_stats_line
-        # so pre-profile flavor text never leaks into rules_json.
-        if not past_stats_line:
+        # so pre-profile flavor text never leaks into rules_json. The
+        # in_rules_zone exemption lets a ``Rules:`` / ``Special Rules``
+        # heading already in effect process bare-token follow-ups (lone
+        # ``Hero``) even before the Q/D row.
+        if not past_stats_line and not in_rules_zone:
             continue
 
         # Stat-table column header (``Weapon Range Attacks AP Special``).
