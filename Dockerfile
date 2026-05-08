@@ -40,6 +40,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OPR_MCP_DB=/data/db/opr.db \
     OPR_MCP_PDF_DIR=/data/pdfs \
     OPR_MCP_WATCH=1 \
+    OPR_MCP_FORGE_PDF_DIR=/data/forge-pdfs \
     HF_HOME=/data/hf-cache
 
 RUN apt-get update \
@@ -51,9 +52,16 @@ WORKDIR /app
 COPY --from=build /python /python
 COPY --from=build /app/.venv /app/.venv
 
-# Mount points: read-only PDF corpus + writable DB + HF model cache.
-RUN mkdir -p /data/pdfs /data/db /data/hf-cache
-VOLUME ["/data/pdfs", "/data/db", "/data/hf-cache"]
+# Mount points:
+#   /data/pdfs       — user's PDF corpus (read-only is fine).
+#   /data/forge-pdfs — Army Forge auto-fetch destination (must be writable
+#                      when OPR_MCP_FORGE_SYNC=1; the watcher in serve picks
+#                      up new books from anywhere under /data/pdfs *and*
+#                      this dir if the user mounts it inside the corpus).
+#   /data/db         — SQLite index. Must be writable.
+#   /data/hf-cache   — HuggingFace model cache.
+RUN mkdir -p /data/pdfs /data/forge-pdfs /data/db /data/hf-cache
+VOLUME ["/data/pdfs", "/data/forge-pdfs", "/data/db", "/data/hf-cache"]
 
 LABEL org.opencontainers.image.source="https://github.com/capeterson/opr-mcp" \
       org.opencontainers.image.description="MCP server indexing One Page Rules PDFs" \

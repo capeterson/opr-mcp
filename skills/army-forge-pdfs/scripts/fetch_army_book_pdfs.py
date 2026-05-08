@@ -76,6 +76,13 @@ def parse_game_arg(value: str) -> list[int]:
     return deduped
 
 
+_MAX_PAGES = 2000  # community catalog is in the thousands at ~30/page; this
+                   # is a runaway-loop guard, not a corpus cap. Hitting it
+                   # almost certainly means a server-side change broke our
+                   # termination condition — fail loudly so the operator
+                   # notices instead of silently truncating output.
+
+
 def list_books(filt: str) -> list[dict]:
     """Walk the listing endpoint, dedup by uid.
 
@@ -84,7 +91,7 @@ def list_books(filt: str) -> list[dict]:
     """
     seen: dict[str, dict] = {}
     page = 1
-    while True:
+    while page <= _MAX_PAGES:
         params = {
             "filters": filt,
             "gameSystemSlug": "",
@@ -111,8 +118,12 @@ def list_books(filt: str) -> list[dict]:
         if new_count == 0:
             break
         page += 1
-        if page > 200:  # hard safety cap
-            break
+    else:
+        raise RuntimeError(
+            f"Pagination safety cap hit at page {_MAX_PAGES} for filter={filt!r}; "
+            "the listing endpoint is still returning new uids. Bump _MAX_PAGES "
+            "after confirming the catalog really is this large."
+        )
     return list(seen.values())
 
 

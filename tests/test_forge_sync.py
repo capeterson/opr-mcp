@@ -168,3 +168,138 @@ def test_local_filename_is_stable_per_pair():
     assert name1 != name3  # game-system-scoped
     assert name1.endswith(".pdf")
     assert "abc" in name1  # uid is in the filename
+
+
+def test_local_filename_immutable_under_book_rename():
+    """A book rename on Forge must not change where we save the PDF, or the
+    next sync would download alongside the old file instead of overwriting."""
+    before = {"uid": "X", "name": "Old Faction"}
+    after = {"uid": "X", "name": "Renamed Faction"}
+    assert sync.local_filename(before, 4) == sync.local_filename(after, 4)
+
+
+def test_sync_records_resolve_failures_in_stats(tmp_db, tmp_path):
+    """ArmyForgeError on resolve must surface as stats.failed, not be silently dropped."""
+    conn = db.open_db(tmp_db)
+    book_ok = _book("OK", "Ok", [4])
+    book_bad = _book("BAD", "Bad", [4])
+
+    def resolve(uid: str, gid: int):
+        if uid == "BAD":
+            raise api.ArmyForgeError("api 500")
+        return _stub_resolve(uid, gid)
+
+    with (
+        patch.object(api, "list_books", return_value=[book_ok, book_bad]),
+        patch.object(api, "resolve_pdf", side_effect=resolve),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert stats.new == 1
+    failures = {name: err for name, err in stats.failed}
+    assert "Bad" in failures
+    assert "api 500" in failures["Bad"]
+
+
+def test_sync_survives_unexpected_resolve_exception(tmp_db, tmp_path):
+    """A non-ArmyForgeError (e.g. JSONDecodeError) for one pair must not
+    abort the whole scan."""
+    conn = db.open_db(tmp_db)
+    book_ok = _book("OK", "Ok", [4])
+    book_bad = _book("BAD", "Bad", [4])
+
+    def resolve(uid: str, gid: int):
+        if uid == "BAD":
+            raise ValueError("malformed JSON")
+        return _stub_resolve(uid, gid)
+
+    with (
+        patch.object(api, "list_books", return_value=[book_ok, book_bad]),
+        patch.object(api, "resolve_pdf", side_effect=resolve),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert stats.new == 1
+    assert any("malformed JSON" in err for _, err in stats.failed)
+
+
+def test_sync_prunes_rows_for_books_no_longer_returned(tmp_db, tmp_path):
+    """A book that disappears from the listing should have its row + local PDF removed."""
+    conn = db.open_db(tmp_db)
+    book_a = _book("A", "Alpha", [4])
+    book_b = _book("B", "Bravo", [4])
+
+    with (
+        patch.object(api, "list_books", return_value=[book_a, book_b]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    b_path = tmp_path / sync.local_filename(book_b, 4)
+    assert b_path.exists()
+    assert conn.execute("SELECT COUNT(*) FROM forge_books").fetchone()[0] == 2
+
+    with (
+        patch.object(api, "list_books", return_value=[book_a]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    rows = conn.execute("SELECT uid FROM forge_books").fetchall()
+    assert {r["uid"] for r in rows} == {"A"}
+    assert stats.pruned == 1
+    assert not b_path.exists()
+
+
+def test_sync_skips_pruning_when_listing_returns_empty(tmp_db, tmp_path):
+    """A spuriously-empty listing response must not nuke previously mirrored books."""
+    conn = db.open_db(tmp_db)
+    book = _book("A", "Alpha", [4])
+
+    with (
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    with (
+        patch.object(api, "list_books", return_value=[]),
+        patch.object(api, "resolve_pdf", side_effect=AssertionError("must not be called")),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert stats.pruned == 0
+    assert conn.execute("SELECT COUNT(*) FROM forge_books").fetchone()[0] == 1
+
+
+def test_sync_pruning_is_filter_scoped(tmp_db, tmp_path):
+    """Running with --filter community must not prune previously mirrored official books."""
+    conn = db.open_db(tmp_db)
+    official = _book("O", "Official", [4], official=True)
+    community = _book("C", "Community", [4], official=False)
+
+    # First scan: pull both filters, so both books land.
+    with (
+        patch.object(api, "list_books", side_effect=lambda f: [official] if f == "official" else [community]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, filters=["official", "community"], game_systems=[4])
+    assert conn.execute("SELECT COUNT(*) FROM forge_books").fetchone()[0] == 2
+
+    # Second scan: only community filter, and it returns nothing. Official
+    # row must survive — it's not in scope for this scan.
+    with (
+        patch.object(api, "list_books", return_value=[community]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, filters=["community"], game_systems=[4])
+
+    rows = {(r["uid"], r["official"]) for r in conn.execute("SELECT uid, official FROM forge_books")}
+    assert rows == {("O", 1), ("C", 0)}

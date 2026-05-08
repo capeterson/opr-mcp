@@ -31,9 +31,11 @@ GAME_SYSTEMS: dict[int, str] = {
 SLUG_TO_ID: dict[str, int] = {slug: gid for gid, slug in GAME_SYSTEMS.items()}
 ALL_GAME_SYSTEM_IDS: list[int] = list(GAME_SYSTEMS.keys())
 
-# Hard cap on listing-pagination loops, defends against an API change that
-# would otherwise spin forever; community catalog is a few hundred pages.
-_MAX_PAGES = 500
+# Runaway-loop guard for listing pagination, not a corpus cap. The community
+# catalog is in the thousands at ~30 per page; if we hit this it almost
+# certainly means a server-side change broke our termination condition, and
+# we'd rather raise loudly than silently return a partial catalog.
+_MAX_PAGES = 2000
 
 log = logging.getLogger(__name__)
 
@@ -99,7 +101,10 @@ def list_books(filt: str = "official") -> list[dict]:
             break
         page += 1
     else:
-        log.warning("forge: listing %s hit %d-page safety cap", filt, _MAX_PAGES)
+        raise ArmyForgeError(
+            f"Listing {filt!r} hit the {_MAX_PAGES}-page safety cap with new "
+            "books still arriving — termination condition likely broken."
+        )
     return list(seen.values())
 
 

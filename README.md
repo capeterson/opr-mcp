@@ -151,13 +151,31 @@ The container mounts:
 
 - `/data/pdfs` — your PDF corpus (read-only is fine). Indexed on startup and
   re-indexed automatically on file changes.
+- `/data/forge-pdfs` — Army Forge auto-fetch destination. Only used when
+  `OPR_MCP_FORGE_SYNC=1`; must be writable in that case. Mount a named
+  volume (e.g. `-v opr-mcp-forge:/data/forge-pdfs`) so downloaded books
+  persist across restarts.
 - `/data/db` — SQLite index. Persist this volume to avoid re-ingesting.
 - `/data/hf-cache` — HuggingFace cache for the embedding model. Persist to
   avoid re-downloading the ~130 MB model on every container restart.
 
-The default `CMD` is `serve`, which honors `OPR_MCP_PDF_DIR=/data/pdfs` and
-`OPR_MCP_WATCH=1` (both set in the image). To use it with Claude Desktop /
-Claude Code, point your MCP config at `docker run … ghcr.io/capeterson/opr-mcp:dev`.
+The default `CMD` is `serve`, which honors `OPR_MCP_PDF_DIR=/data/pdfs`,
+`OPR_MCP_WATCH=1`, and `OPR_MCP_FORGE_PDF_DIR=/data/forge-pdfs` (all set in
+the image). To use it with Claude Desktop / Claude Code, point your MCP
+config at `docker run … ghcr.io/capeterson/opr-mcp:dev`.
+
+To turn on Army Forge auto-fetch in the container, add
+`-e OPR_MCP_FORGE_SYNC=1` and a writable forge-pdfs volume:
+
+```bash
+docker run --rm -i \
+  -v /path/to/your/opr-pdfs:/data/pdfs:ro \
+  -v opr-mcp-forge:/data/forge-pdfs \
+  -v opr-mcp-db:/data/db \
+  -v opr-mcp-hf:/data/hf-cache \
+  -e OPR_MCP_FORGE_SYNC=1 \
+  ghcr.io/capeterson/opr-mcp:dev
+```
 
 ## Tests
 

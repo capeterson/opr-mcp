@@ -138,17 +138,38 @@ def serve(
     them up.
     """
     configure_logging()
+    if forge_sync and not watch:
+        raise typer.BadParameter(
+            "--forge-sync requires --watch (or OPR_MCP_WATCH=1): the scheduler "
+            "drops new PDFs into the corpus and the watcher is what feeds them "
+            "into the index. Without --watch, downloaded books would sit unused "
+            "until the next manual ingest."
+        )
+    watched: list[Path] = []
     if pdf_dir is not None:
         from .watch import initial_ingest, start_watcher
         pdf_dir.mkdir(parents=True, exist_ok=True)
         initial_ingest(pdf_dir)
         if watch:
             start_watcher(pdf_dir)
+        watched.append(pdf_dir.resolve())
     if forge_sync:
         from .forge import config as fcfg
         from .forge.scheduler import ForgeScheduler
+        from .watch import initial_ingest, start_watcher
         target = fcfg.pdf_dir(pdf_dir)
         target.mkdir(parents=True, exist_ok=True)
+        # If the forge target isn't under an already-watched dir, watch it
+        # too so downloaded books reach the ingest pipeline. Recursive
+        # watchers on a parent dir already cover subdirs.
+        target_resolved = target.resolve()
+        already_watched = any(
+            target_resolved == w or _is_under(target_resolved, w) for w in watched
+        )
+        if not already_watched:
+            initial_ingest(target)
+            start_watcher(target)
+            watched.append(target_resolved)
         scheduler = ForgeScheduler(
             pdf_dir=target,
             interval_seconds=fcfg.interval_seconds(),
@@ -157,6 +178,14 @@ def serve(
         )
         scheduler.start()
     server.main()
+
+
+def _is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
 
 
 @app.command(name="forge-scan")
