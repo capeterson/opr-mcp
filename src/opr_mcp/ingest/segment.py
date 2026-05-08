@@ -14,9 +14,29 @@ _QUALITY_DEF_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A unit name is typically the line immediately before the stat line, in title case,
-# 1-6 words long. We approximate.
+# A unit name candidate immediately preceding the stat line. Two shapes:
+#   - "Kemba Brute Boss [1] - 140pts"  (real OPR army books)
+#   - "Battle Brothers"                 (simpler / synthetic style)
+_UNIT_NAME_LINE_RE = re.compile(
+    r"^[A-Za-z][A-Za-z' \-/]+?\s*\[\s*\d{1,2}\s*\]\s*-\s*\d{1,4}\s*(?:pts|points)\b",
+    re.IGNORECASE,
+)
 _UNIT_NAME_RE = re.compile(r"^[A-Z][\w'\- ]{2,60}$")
+
+
+def _unit_name_from_line(line: str) -> str | None:
+    """Return the bare unit name if ``line`` looks like a unit-card name line."""
+    line = line.strip()
+    if not line:
+        return None
+    m = _UNIT_NAME_LINE_RE.match(line)
+    if m:
+        # The name is everything before the "[" — grab it explicitly.
+        head = line.split("[", 1)[0].strip()
+        return head or None
+    if _UNIT_NAME_RE.match(line):
+        return line
+    return None
 
 # Headers that mark big sections in OPR core rules.
 # "special rules" is intentionally NOT here — it's handled separately so we
@@ -51,27 +71,23 @@ def _classify_block(text: str, prev_text: str | None) -> tuple[str, str | None] 
     first_line = stripped.splitlines()[0].strip() if stripped else ""
 
     if _QUALITY_DEF_RE.search(stripped):
-        # The unit name is the line immediately before the stat line. Check the
-        # *last non-empty line* of prev_text only — scanning further back picks
-        # up unrelated headers (e.g. "Special Rules") that happen to match the
-        # name shape.
-        title: str | None = None
-        if _UNIT_NAME_RE.match(first_line):
-            title = first_line
-        elif prev_text:
+        # The unit name is on the line immediately before the stat line, OR is
+        # the first line of this block.
+        title: str | None = _unit_name_from_line(first_line)
+        if title is None and prev_text:
             for line in reversed(prev_text.splitlines()):
-                line = line.strip()
-                if not line:
+                if not line.strip():
                     continue
-                if _UNIT_NAME_RE.match(line):
-                    title = line
-                break  # only check the immediately-prior line
+                title = _unit_name_from_line(line)
+                break  # only check the immediately-prior non-empty line
         return ("unit", title)
 
     low = first_line.lower()
     if low in _CORE_HEADERS:
         return ("core_rule", first_line)
-    if low.startswith("special rules"):
+    # Both "SPECIAL RULES" (army-book glossary) and "ARMY-WIDE SPECIAL RULE"
+    # (the per-faction always-on rule) feed the special_rules table.
+    if low.startswith("special rules") or "army-wide special rule" in low:
         return ("special_rule", "Special Rules")
 
     return None

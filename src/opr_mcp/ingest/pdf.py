@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -52,18 +53,46 @@ def page_count(path: Path) -> int:
         return doc.page_count
 
 
+_BANNER_RE = re.compile(
+    r"^\s*(?P<sys>AOF|GF|GFF|FF|AOFS|GFS)\s*-\s*(?P<army>[A-Z][A-Z' &]+?)\s*V[\d.]+\s*$",
+    re.MULTILINE,
+)
+_SYSTEM_FROM_BANNER = {
+    "AOF": "aof",
+    "GF": "gf",
+    "GFF": "gff",
+    "FF": "gff",
+    "AOFS": "skirmish",
+    "GFS": "skirmish",
+}
+
+
 def detect_metadata(path: Path, sample_pages: int = 3) -> dict:
     """Best-effort detection of game system, title, and army from the first few pages.
 
-    Heuristics only — populate what we can, leave the rest as ``None``. Search rules
-    don't depend on these being correct; they only filter or label results.
+    Two paths:
+    - **Banner pattern** (army books): ``AOF - BEASTMEN V3.5.3`` style. This is the
+      reliable case — every modern OPR army book uses it on every page.
+    - **Keyword fallback** (core rulebooks): scan for "Grimdark Future", "Age of
+      Fantasy", etc. in mixed case.
     """
     text = ""
     with pymupdf.open(str(path)) as doc:
         for i in range(min(sample_pages, doc.page_count)):
             text += doc[i].get_text() + "\n"
-    lower = text.lower()
 
+    m = _BANNER_RE.search(text)
+    if m:
+        army_caps = m.group("army").strip()
+        # "BEASTMEN" -> "Beastmen". Title-case for display.
+        army = " ".join(w.capitalize() for w in army_caps.split())
+        return {
+            "game_system": _SYSTEM_FROM_BANNER.get(m.group("sys").upper()),
+            "title": m.group(0).strip(),
+            "army": army,
+        }
+
+    lower = text.lower()
     game_system = None
     if "grimdark future" in lower:
         game_system = "gf"
@@ -85,19 +114,8 @@ def detect_metadata(path: Path, sample_pages: int = 3) -> dict:
             title = s
             break
 
-    army = None
-    if not is_core:
-        for line in text.splitlines()[:60]:
-            s = line.strip()
-            if 3 <= len(s) <= 60 and s == s.title() and not any(
-                kw in s.lower()
-                for kw in ("grimdark", "age of fantasy", "firefight", "skirmish", "version", "rules")
-            ):
-                army = s
-                break
-
     return {
         "game_system": game_system if not is_core else "core",
         "title": title,
-        "army": army,
+        "army": None,
     }
