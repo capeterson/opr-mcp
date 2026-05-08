@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 
 AUTH_CODE_TTL = 600  # seconds
 STATE_MAX_AGE = 600  # seconds
+DEFAULT_SCOPES: tuple[str, ...] = ("mcp",)
 
 
 class DiscordOAuthProvider(
@@ -60,6 +61,17 @@ class DiscordOAuthProvider(
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
+        # When the client omits ``scope`` on /authorize, fall back to the
+        # client's registered scopes (which DCR seeds from default_scopes).
+        # An empty list here would issue tokens that fail the server's
+        # ``required_scopes`` check immediately.
+        if params.scopes:
+            scopes = params.scopes
+        elif client.scope:
+            scopes = client.scope.split()
+        else:
+            scopes = list(DEFAULT_SCOPES)
+
         pending_id = secrets.token_urlsafe(16)
         await self._store.save_pending(
             storage.PendingAuthorization(
@@ -68,7 +80,7 @@ class DiscordOAuthProvider(
                 redirect_uri=str(params.redirect_uri),
                 redirect_explicit=params.redirect_uri_provided_explicitly,
                 code_challenge=params.code_challenge,
-                scopes=params.scopes or [],
+                scopes=scopes,
                 state=params.state,
                 resource=params.resource,
                 expires_at=storage.now() + STATE_MAX_AGE,
@@ -218,13 +230,19 @@ class DiscordOAuthProvider(
         new_scopes = scopes if scopes else stored.scopes
         if not set(new_scopes).issubset(set(stored.scopes)):
             raise TokenError("invalid_scope", "requested scopes exceed original grant")
-        # Rotate: kill the entire prior grant (old access + old refresh) and issue a fresh pair.
+        # Rotate: kill the entire prior grant (old access + old refresh) and
+        # issue a fresh pair with the SAME absolute deadline + resource binding.
+        # Re-using the original ``expires_at`` makes the grant non-sliding so a
+        # user removed from the Discord guild can keep MCP access for at most
+        # OPR_MCP_REFRESH_TOKEN_TTL from initial login, rather than indefinitely
+        # by repeatedly refreshing.
         await self._store.revoke_grant(stored.grant_id)
         return await self._issue_tokens(
             client_id=stored.client_id,
             discord_user_id=stored.discord_user_id,
             scopes=new_scopes,
-            resource=None,
+            resource=stored.resource,
+            refresh_expires_at=stored.expires_at,
         )
 
     # --- access token verification ---
@@ -262,12 +280,16 @@ class DiscordOAuthProvider(
         discord_user_id: str,
         scopes: list[str],
         resource: str | None,
+        refresh_expires_at: int | None = None,
     ) -> OAuthToken:
         grant_id = storage.new_grant_id()
         access = storage.new_token()
         refresh = storage.new_token()
         access_expires = storage.now() + self._config.access_token_ttl
-        refresh_expires = storage.now() + self._config.refresh_token_ttl
+        # Initial issuance: now + REFRESH_TOKEN_TTL.
+        # Refresh rotation: caller passes the existing absolute deadline, so the
+        # grant cannot be extended indefinitely.
+        refresh_expires = refresh_expires_at if refresh_expires_at is not None else storage.now() + self._config.refresh_token_ttl
         await self._store.save_access_token(
             storage.StoredAccessToken(
                 token=access,
@@ -286,6 +308,7 @@ class DiscordOAuthProvider(
                 client_id=client_id,
                 discord_user_id=discord_user_id,
                 scopes=scopes,
+                resource=resource,
                 expires_at=refresh_expires,
             )
         )

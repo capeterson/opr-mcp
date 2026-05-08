@@ -129,7 +129,7 @@ async def test_revoke_grant_kills_both_halves(tmp_db):
     await s.save_refresh_token(
         storage.StoredRefreshToken(
             token=refresh, grant_id=grant, client_id="c1", discord_user_id="u1",
-            scopes=["mcp"], expires_at=storage.now() + 600,
+            scopes=["mcp"], resource=None, expires_at=storage.now() + 600,
         )
     )
     await s.revoke_grant(grant)

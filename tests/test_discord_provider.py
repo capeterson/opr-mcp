@@ -233,6 +233,78 @@ async def test_guild_pagination(tmp_db):
     assert "code=" in redirect
 
 
+async def test_authorize_defaults_scopes_when_client_omits(provider):
+    """Clients that omit ``scope`` on /authorize must still get the configured
+    scope so the issued token clears ``required_scopes``."""
+    client = await provider.get_client("client-1")
+    params = AuthorizationParams(
+        state=None,
+        scopes=None,  # client omitted scope param
+        code_challenge="c",
+        redirect_uri=AnyUrl("https://app.example.com/cb"),
+        redirect_uri_provided_explicitly=True,
+        resource=None,
+    )
+    discord_url = await provider.authorize(client, params)
+    state = _query_param(discord_url, "state")
+    pending = await provider.take_pending_for_state(state)
+    redirect = await provider.complete_discord_callback(pending=pending, code="x")
+    mcp_code = _query_param(redirect, "code")
+    auth_code = await provider.load_authorization_code(client, mcp_code)
+    token = await provider.exchange_authorization_code(client, auth_code)
+    issued = await provider.load_access_token(token.access_token)
+    assert issued is not None
+    assert "mcp" in issued.scopes
+
+
+async def test_refresh_does_not_extend_grant_lifetime(provider):
+    """Rotating a refresh token must preserve the original absolute expiry so
+    a removed-from-guild user can't extend access by repeated refreshing."""
+    _, first = await _issue_pair(provider)
+    client = await provider.get_client("client-1")
+    rt1 = await provider.load_refresh_token(client, first.refresh_token)
+    original_expiry = rt1.expires_at
+
+    second = await provider.exchange_refresh_token(client, rt1, ["mcp"])
+    rt2 = await provider.load_refresh_token(client, second.refresh_token)
+    assert rt2.expires_at == original_expiry
+
+
+async def test_refresh_preserves_resource_binding(tmp_db):
+    """If the original /authorize specified an RFC 8707 resource, the rotated
+    access/refresh tokens must remain bound to it."""
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+    cfg = _make_config()
+    p = DiscordOAuthProvider(cfg, store, http_client_factory=_httpx_factory(_discord_handler_ok()))
+    await store.save_client(_make_client())
+    client = await store.get_client("client-1")
+
+    params = AuthorizationParams(
+        state=None,
+        scopes=["mcp"],
+        code_challenge="c",
+        redirect_uri=AnyUrl("https://app.example.com/cb"),
+        redirect_uri_provided_explicitly=True,
+        resource="https://opr.example.com/mcp",
+    )
+    discord_url = await p.authorize(client, params)
+    state = _query_param(discord_url, "state")
+    pending = await p.take_pending_for_state(state)
+    redirect = await p.complete_discord_callback(pending=pending, code="x")
+    auth_code = await p.load_authorization_code(client, _query_param(redirect, "code"))
+    first = await p.exchange_authorization_code(client, auth_code)
+
+    issued1 = await p.load_access_token(first.access_token)
+    assert issued1.resource == "https://opr.example.com/mcp"
+
+    rt = await p.load_refresh_token(client, first.refresh_token)
+    second = await p.exchange_refresh_token(client, rt, ["mcp"])
+    issued2 = await p.load_access_token(second.access_token)
+    assert issued2.resource == "https://opr.example.com/mcp"
+
+
 def _query_param(url: str, key: str) -> str:
     from urllib.parse import parse_qs, urlparse
 

@@ -84,6 +84,7 @@ class StoredRefreshToken:
     client_id: str
     discord_user_id: str
     scopes: list[str]
+    resource: str | None
     expires_at: int | None
 
 
@@ -261,14 +262,15 @@ class AuthStorage:
 
     async def save_refresh_token(self, t: StoredRefreshToken) -> None:
         self._conn.execute(
-            "INSERT INTO oauth_refresh_tokens (token_hash, grant_id, client_id, discord_user_id, scopes_json, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO oauth_refresh_tokens (token_hash, grant_id, client_id, discord_user_id, scopes_json, resource, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 hash_token(t.token),
                 t.grant_id,
                 t.client_id,
                 t.discord_user_id,
                 json.dumps(t.scopes),
+                t.resource,
                 t.expires_at,
             ),
         )
@@ -289,6 +291,7 @@ class AuthStorage:
             client_id=row["client_id"],
             discord_user_id=row["discord_user_id"],
             scopes=json.loads(row["scopes_json"]),
+            resource=row["resource"],
             expires_at=row["expires_at"],
         )
 

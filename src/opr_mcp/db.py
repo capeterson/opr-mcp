@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
     client_id            TEXT NOT NULL,
     discord_user_id      TEXT NOT NULL,
     scopes_json          TEXT NOT NULL,
+    resource             TEXT,
     expires_at           INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON oauth_refresh_tokens(client_id);
