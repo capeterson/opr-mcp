@@ -62,3 +62,40 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  purge:
+    name: Purge old GHCR images
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OWNER: ${{ github.repository_owner }}
+      PACKAGE: ${{ github.event.repository.name }}
+    steps:
+      - name: Delete old container versions
+        run: |
+          set -euo pipefail
+
+          owner_type=$(gh api "/users/$OWNER" --jq .type)
+          if [ "$owner_type" = "Organization" ]; then
+            base="orgs/$OWNER"
+          else
+            base="users/$OWNER"
+          fi
+
+          # Keep the 20 most recent versions that don't carry a v* tag.
+          # Versions tagged v* (release builds) are always retained.
+          gh api --paginate "/$base/packages/container/$PACKAGE/versions" \
+            --jq '.[] | select(((.metadata.container.tags // []) | map(test("^v")) | any) | not) | "\(.created_at) \(.id)"' \
+            | sort -r \
+            | tail -n +21 \
+            | while read -r created_at id; do
+                echo "Deleting version $id (created $created_at)"
+                # GHCR refuses to delete some versions (e.g. >5000 downloads).
+                # Don't fail the workflow on a single per-version error.
+                if ! gh api -X DELETE "/$base/packages/container/$PACKAGE/versions/$id"; then
+                  echo "::warning::Failed to delete version $id; skipping"
+                fi
+              done
