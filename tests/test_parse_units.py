@@ -54,6 +54,52 @@ def test_parse_unit_equipment_with_nested_parens():
     assert all(e["name"].lower() != "tough" for e in u.equipment)
 
 
+def test_parse_unit_ignores_upgrade_option_prose():
+    """Upgrade prose embedding a weapon must not pollute base equipment."""
+    s = _section(
+        "Hero [1] - 100pts\n"
+        "Quality 3+   Defense 4+\n"
+        "CCW (A2)\n"
+        "Replace one model's weapon with Plasma Pistol (12\", A1, AP(2))\n"
+        "Hero, Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = [e["name"] for e in u.equipment]
+    # Base equipment has CCW only; the upgrade option must NOT appear.
+    assert eq_names == ["CCW"], eq_names
+
+
+def test_parse_unit_keeps_non_attack_equipment_alongside_weapon():
+    """Defensive gear without an A<n> marker is kept when listed with a weapon."""
+    s = _section(
+        "Shielded Brother [5] - 110pts\n"
+        "Quality 4+   Defense 4+\n"
+        "CCW (A2), Combat Shield (Shield Wall)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"CCW", "Combat Shield"}.issubset(eq_names), eq_names
+
+
+def test_parse_unit_captures_lone_non_parametric_rule_after_weapon():
+    """A bare single rule like ``Hero`` on its own line is captured."""
+    s = _section(
+        "Champion [1] - 80pts\n"
+        "Quality 3+   Defense 4+\n"
+        "CCW (A3)\n"
+        "Hero\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Hero" in u.rules
+
+
 def test_parse_unit_inline_comma_joined_weapons():
     """Multiple weapons on a single comma-joined line."""
     s = _section(

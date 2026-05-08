@@ -27,12 +27,16 @@ _UNIT_NAME_LINE_RE = re.compile(
 # Equipment token: "[Nx ]Name (body)" where ``body`` may contain ONE level of
 # nested parens (real OPR weapons commonly have "AP(N)", "Blast(N)",
 # "Reliable", etc. inside their stat block, e.g. ``Rifle (24", A1, AP(1))``).
-# Used with ``finditer`` so multiple weapons on a single comma-joined line all
-# get captured.
+# Names are 1–4 capitalized words: this rejects upgrade prose like
+# ``Replace one model's weapon with Plasma Pistol (...)`` because lowercase
+# connective words break the word chain.
 _EQUIP_TOKEN_RE = re.compile(
     r"""
     (?P<count>\d+x\s+)?
-    (?P<name>[A-Z][A-Za-z'\-/ ]{1,40}?)
+    (?P<name>
+        [A-Z][A-Za-z'\-/]{0,30}
+        (?:\s+[A-Z][A-Za-z'\-/]{0,30}){0,3}
+    )
     \s*\(
         (?P<body>(?:[^()]|\([^()]*\))+)
     \)
@@ -41,7 +45,9 @@ _EQUIP_TOKEN_RE = re.compile(
 )
 # A weapon's body always includes at least an attacks marker like ``A1``/``A2``.
 # Without this filter, parametric *rules* like ``Tough(3)`` masquerade as
-# weapons named "Tough".
+# weapons named "Tough". We require this on at least one item per line, but
+# allow non-attack siblings (e.g. shields, banners) on a line that already
+# contains a weapon — that's how OPR cards list defensive/support gear.
 _WEAPON_ATTACKS_RE = re.compile(r"\bA\d+\b")
 # Rule token: ``Furious``, ``Tough(3)``, ``AP(2)``, ``Bestial Boost``. Used to
 # identify a bare comma-separated rules line on a unit card (no ``Rules:``
@@ -70,6 +76,42 @@ _RULE_ENTRY_RE = re.compile(
 _BARE_NAME_RE = re.compile(
     r"^(?P<name>[A-Z][A-Za-z' ]{2,29})(?P<param>\s*\([^)]{1,10}\))?\s*$"
 )
+
+
+def _parse_equipment_line(line: str) -> list[dict]:
+    """Return all equipment items if ``line`` is a pure equipment list.
+
+    A line qualifies only when it consists entirely of ``Name (body)`` tokens
+    separated by commas/spaces — anything else (stat lines, prose, upgrade
+    options like ``Replace one model's weapon with X (...)``) returns ``[]``.
+    At least one token's body must contain a weapon attacks marker (``A<n>``);
+    once that anchor is satisfied, sibling items without attacks are kept too,
+    so defensive gear like ``Combat Shield (Shield Wall)`` listed alongside a
+    weapon is preserved.
+    """
+    s = line.strip()
+    if not s:
+        return []
+    items: list[dict] = []
+    pos = 0
+    while pos < len(s):
+        while pos < len(s) and s[pos] in " ,":
+            pos += 1
+        if pos >= len(s):
+            break
+        m = _EQUIP_TOKEN_RE.match(s, pos)
+        if not m:
+            return []
+        items.append({
+            "name": m.group("name").strip(),
+            "details": m.group("body").strip(),
+        })
+        pos = m.end()
+    if not items:
+        return []
+    if not any(_WEAPON_ATTACKS_RE.search(it["details"]) for it in items):
+        return []
+    return items
 
 
 def _looks_like_rule_name(name: str) -> bool:
@@ -174,6 +216,7 @@ def parse_unit(section: Section) -> ParsedUnit | None:
     seen_equipment: set[tuple[str, str]] = set()
     rules: list[str] = []
     seen_rules: set[str] = set()
+    in_stat_block = False  # set once we've identified an equipment or rules line
 
     def _add_rule(tok: str) -> None:
         tok = tok.strip()
@@ -194,45 +237,47 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         if _UNIT_NAME_LINE_RE.match(s) or _QUALITY_DEF_RE.search(s):
             continue
 
-        # Equipment: scan for every "Name (body)" token on the line where the
-        # body has a weapon-attacks marker. ``finditer`` handles comma-joined
-        # weapons on a single line and ``_WEAPON_ATTACKS_RE`` keeps parametric
-        # rules like ``Tough(3)`` from being mis-classified as a weapon.
-        line_had_weapon = False
-        for em in _EQUIP_TOKEN_RE.finditer(s):
-            body = em.group("body").strip()
-            if not _WEAPON_ATTACKS_RE.search(body):
-                continue
-            line_had_weapon = True
-            name_tok = em.group("name").strip()
-            key = (name_tok.lower(), body.lower())
-            if key in seen_equipment:
-                continue
-            seen_equipment.add(key)
-            equipment.append({"name": name_tok, "details": body})
-
-        if line_had_weapon:
+        # Equipment: a line qualifies only if it parses end-to-end as a list of
+        # ``Name (body)`` tokens with at least one weapon among them. Upgrade
+        # prose like ``Replace one model's weapon with X (...)`` does not match
+        # because the lowercase connective words break the name pattern.
+        items = _parse_equipment_line(s)
+        if items:
+            for it in items:
+                key = (it["name"].lower(), it["details"].lower())
+                if key in seen_equipment:
+                    continue
+                seen_equipment.add(key)
+                equipment.append(it)
+            in_stat_block = True
             continue
 
         # Explicit ``Rules:`` / ``Special:`` prefix (older / synthetic format).
         if s.startswith("Rules:") or s.startswith("Special:"):
             for tok in re.split(r",|;", s.split(":", 1)[1]):
                 _add_rule(tok)
+            in_stat_block = True
             continue
 
-        # Bare rule line: ``Tough(3), Furious, Hero``. Real OPR army-book unit
-        # cards print rules without any prefix at the bottom of the card. We
-        # accept a line as a rules line when every comma/semicolon-separated
-        # token looks like a rule name and there are either >=2 tokens or at
-        # least one parametric token — that filters out incidental TitleCase
-        # phrases (e.g. a stray unit-name fragment).
+        # Bare rule line: ``Tough(3), Furious, Hero`` or a lone ``Hero``. Real
+        # OPR army-book unit cards print rules without any prefix at the bottom
+        # of the card. To stay safe against incidental TitleCase phrases, a
+        # single non-parametric token only counts as a rule line once we're
+        # already in the stat block (i.e. equipment or another rules line has
+        # been seen on this card).
         tokens = [t.strip() for t in re.split(r"[,;]", s) if t.strip()]
         if not tokens or not all(_RULE_TOKEN_RE.match(t) for t in tokens):
             continue
-        if len(tokens) < 2 and not any("(" in t for t in tokens):
+        is_safe_rule_line = (
+            len(tokens) >= 2
+            or any("(" in t for t in tokens)
+            or in_stat_block
+        )
+        if not is_safe_rule_line:
             continue
         for tok in tokens:
             _add_rule(tok)
+        in_stat_block = True
 
     return ParsedUnit(
         name=name.strip(),
