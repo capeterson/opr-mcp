@@ -767,6 +767,76 @@ def test_parse_unit_single_word_boundary_with_inline_content():
     assert "Rifle" in eq_names, eq_names
 
 
+def test_parse_unit_mixed_weapon_and_textual_param_rules():
+    """``CCW (A1), Aura(Friendly), Beacon(Allies)`` keeps the weapon AND routes the rules."""
+    s = _section(
+        "Commander [1] - 130pts\n"
+        "Quality 3+   Defense 4+\n"
+        "CCW (A1), Aura(Friendly), Beacon(Allies)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert "CCW" in eq_names, eq_names
+    assert "Aura" not in eq_names
+    assert "Beacon" not in eq_names
+    rule_set = set(u.rules)
+    assert "Aura(Friendly)" in rule_set, u.rules
+    assert "Beacon(Allies)" in rule_set, u.rules
+
+
+def test_parse_unit_inline_special_rules_heading_with_content():
+    """``Special Rules Hero`` glued line strips the heading and keeps Hero."""
+    s = _section(
+        "Trooper [1] - 60pts\n"
+        "Quality 4+   Defense 5+\n"
+        "CCW (A1)\n"
+        "Special Rules Hero\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Hero" in rule_set, u.rules
+    # The heading must not show up as a rule.
+    assert "Special Rules" not in rule_set
+    assert "Special Rules Hero" not in rule_set
+
+
+def test_parse_unit_special_rules_heading_then_lone_rule():
+    """Lone ``Hero`` after a ``Special Rules`` heading is captured even without other anchor."""
+    s = _section(
+        "Champion [1] - 70pts\n"
+        "Quality 3+   Defense 4+\n"
+        "CCW (A1)\n"
+        "Special Rules\n"
+        "Hero\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Hero" in u.rules
+
+
+def test_parse_unit_special_rules_heading_then_textual_param():
+    """Single ``Aura(Friendly)`` after ``Special Rules`` heading routes to rules."""
+    s = _section(
+        "Beacon [1] - 70pts\n"
+        "Quality 4+   Defense 4+\n"
+        "CCW (A1)\n"
+        "Special Rules\n"
+        "Aura(Friendly)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Aura(Friendly)" in rule_set, u.rules
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Aura" not in eq_names
+
+
 def test_parse_unit_strips_count_prefix_on_rule_tokens():
     """Per-model count prefix on rules ('10x Furious') must be tolerated."""
     s = _section(

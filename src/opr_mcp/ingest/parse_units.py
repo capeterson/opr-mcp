@@ -168,6 +168,40 @@ def _is_inprofile_heading(line: str) -> bool:
     card's gear list)."""
     return _normalize_heading(line) in _INPROFILE_HEADINGS
 
+
+# In-profile headings that mark the rules column (``Special Rules`` /
+# ``Rules``). When one of these appears (alone or as a glued prefix), the
+# parser switches into "rules zone" — subsequent paren items default to
+# rules instead of gear, and lone bare tokens are accepted as rules even
+# without an in_stat_block anchor. Other in-profile headings (``Equipment``,
+# ``Weapons``, ``Melee``, etc.) reset rules zone back off.
+_RULES_ZONE_HEADINGS = frozenset({"special rules", "rules"})
+
+
+def _strip_inprofile_heading(line: str) -> tuple[str | None, str]:
+    """Strip an in-profile heading prefix from ``line``.
+
+    Returns ``(kind, remainder)`` where ``kind`` is ``'rules'`` for a
+    ``Special Rules`` / ``Rules`` heading, ``'gear'`` for any other
+    in-profile heading, and ``None`` if the line is not an in-profile
+    heading. ``remainder`` is the inline content following the heading
+    (empty when the heading is on its own line). Multi-word headings are
+    matched first so ``Special Rules Hero`` strips ``Special Rules``,
+    not ``Special``.
+    """
+    s = line.strip()
+    norm = s.lower()
+    sorted_headings = sorted(_INPROFILE_HEADINGS, key=len, reverse=True)
+    for h in sorted_headings:
+        kind = "rules" if h in _RULES_ZONE_HEADINGS else "gear"
+        if norm == h or norm == h + ":":
+            return kind, ""
+        for sep in (" ", ":"):
+            prefix = h + sep
+            if norm.startswith(prefix):
+                return kind, s[len(prefix):].strip()
+    return None, s
+
 # Two glossary formats observed in real OPR PDFs:
 #
 # 1. Inline (army books, some core sections):
@@ -324,31 +358,27 @@ def _parse_paren_line(line: str) -> tuple[list[dict], list[str]] | None:
         else:
             equipment.append({"name": name, "details": body})
 
-    # Reclassification for custom textual-param rule lists. A line with
-    # >=2 paren items where every item is a single-word name + single
-    # alphabetic-word body AND none of those bodies match a recognized
-    # OPR rule name reads as custom rules, not gear. ``Aura(Friendly),
-    # Beacon(Allies)`` reclassifies; ``Horse (Fast), Cloak (Stealth)``
-    # does NOT (``Fast`` / ``Stealth`` are real rules, so the parens
-    # tokens are rule-granting gear). Bare-rule siblings on the same
-    # line are preserved separately.
-    is_textual_param = (
-        len(raw_paren_items) >= 2
-        and not any(_WEAPON_ATTACKS_RE.search(b) for _, b in raw_paren_items)
-        and all(
-            "(" not in b
-            and re.fullmatch(r"[A-Za-z]+", b.strip()) is not None
-            for _, b in raw_paren_items
-        )
-        and not any(
-            b.strip().lower() in _COMMON_RULE_NAMES
-            for _, b in raw_paren_items
-        )
-    )
-    if is_textual_param:
-        equipment = []
-        rule_tokens = list(bare_rules) + [
-            f"{n}({b})" for n, b in raw_paren_items
+    # Per-item textual-param rule reclassification. Items whose body is a
+    # single non-whitelisted alphabetic word (``Friendly`` / ``Allies``) are
+    # treated as custom textual-parameter rules; weapon siblings on the same
+    # line keep their equipment classification. Requires >=2 such non-weapon
+    # textual-param items so a standalone ``Cloak (Stealth)`` stays gear.
+    non_weapon_textual_param = [
+        (n, b)
+        for n, b in raw_paren_items
+        if not _WEAPON_ATTACKS_RE.search(b)
+        and "(" not in b
+        and re.fullmatch(r"[A-Za-z]+", b.strip()) is not None
+        and b.strip().lower() not in _COMMON_RULE_NAMES
+    ]
+    if len(non_weapon_textual_param) >= 2:
+        candidates = {(n, b) for n, b in non_weapon_textual_param}
+        equipment = [
+            it for it in equipment
+            if (it["name"], it["details"]) not in candidates
+        ]
+        rule_tokens = list(rule_tokens) + [
+            f"{n}({b})" for n, b in non_weapon_textual_param
         ]
     return equipment, rule_tokens
 
@@ -535,6 +565,7 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         equipment.append(it)
 
     past_stats_line = False
+    in_rules_zone = False
     for line in text.splitlines():
         s = line.strip()
         if not s:
@@ -546,11 +577,18 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         # don't pollute the unit profile.
         if _is_profile_boundary(s):
             break
-        # In-profile column/section header (``Equipment``, ``Weapons``,
-        # ``Special Rules``): skip the line but keep scanning — the actual
-        # gear/rules typically follow on subsequent lines.
-        if _is_inprofile_heading(s):
-            continue
+
+        # In-profile column header — possibly glued to its first row of
+        # content (``Special Rules Hero`` / ``Weapons Rifle (24", A1)``).
+        # Strip the heading, set/clear ``in_rules_zone``, and either skip
+        # the line if there's no remainder or fall through to process the
+        # remainder as if it were the line.
+        heading_kind, remainder = _strip_inprofile_heading(s)
+        if heading_kind is not None:
+            in_rules_zone = heading_kind == "rules"
+            if not remainder:
+                continue
+            s = remainder
 
         # Skip the name+stats lines and remember whether we've passed the
         # Q/D stat line. The plain-title layout's name line (``Battle
@@ -571,10 +609,20 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         # (``Tough(3)``, ``Scout(6")``) go to rules — so a collapsed
         # weapon+rule line like ``CCW (A2), Tough(3)`` keeps the weapon
         # AND the rule. Single-word gear with a rule descriptor
-        # (``Cloak (Stealth)``) likewise stays in equipment.
+        # (``Cloak (Stealth)``) likewise stays in equipment, except
+        # while we're in the ``Special Rules`` column zone, where
+        # non-weapon paren items default to rules.
         parsed = _parse_paren_line(s)
         if parsed is not None:
             paren_eq, paren_rules = parsed
+            if in_rules_zone:
+                kept_eq: list[dict] = []
+                for it in paren_eq:
+                    if _WEAPON_ATTACKS_RE.search(it["details"]):
+                        kept_eq.append(it)
+                    else:
+                        paren_rules.append(f"{it['name']}({it['details']})")
+                paren_eq = kept_eq
             has_weapon = any(
                 _WEAPON_ATTACKS_RE.search(it["details"]) for it in paren_eq
             )
@@ -640,11 +688,13 @@ def parse_unit(section: Section) -> ParsedUnit | None:
             continue
         # A single non-parametric token (lone ``Hero``) only counts once we
         # already know we're inside the unit's stat block (set by the
-        # first-pass anchor detection or by an earlier line on this card).
+        # first-pass anchor detection, an earlier line on this card, or
+        # the active ``Special Rules`` column zone).
         is_safe_rule_line = (
             len(tokens) >= 2
             or any("(" in t for t in tokens)
             or in_stat_block
+            or in_rules_zone
         )
         if not is_safe_rule_line:
             continue
