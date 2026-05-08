@@ -50,25 +50,6 @@ def _hydrate(conn: sqlite3.Connection, ids: list[int]) -> dict[int, dict]:
     return {row["id"]: dict(row) for row in rows}
 
 
-def _document_filter_ids(
-    conn: sqlite3.Connection,
-    *,
-    game_system: str | None,
-    army: str | None,
-) -> list[int] | None:
-    if not game_system and not army:
-        return None
-    sql = "SELECT id FROM documents WHERE 1=1"
-    params: list = []
-    if game_system:
-        sql += " AND game_system = ?"
-        params.append(game_system)
-    if army:
-        sql += " AND army = ?"
-        params.append(army)
-    return [r[0] for r in conn.execute(sql, params).fetchall()]
-
-
 def hybrid_search(
     conn: sqlite3.Connection,
     query: str,
@@ -77,10 +58,14 @@ def hybrid_search(
     candidate_pool: int = 50,
     game_system: str | None = None,
     army: str | None = None,
+    version: str | None = None,
 ) -> list[SearchResult]:
+    from ..tools import filtered_document_ids
     parsed = preprocess(query)
-    doc_ids = _document_filter_ids(conn, game_system=game_system, army=army)
-    if doc_ids is not None and not doc_ids:
+    doc_ids = filtered_document_ids(
+        conn, game_system=game_system, army=army, version=version,
+    )
+    if not doc_ids:
         return []
 
     fts_results = fts.search(conn, parsed.text, limit=candidate_pool, document_ids=doc_ids)

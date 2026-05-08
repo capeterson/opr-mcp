@@ -89,6 +89,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         limit: int = 10,
         game_system: str | None = None,
         army: str | None = None,
+        version: str | None = None,
     ) -> list[dict[str, Any]]:
         """Free-text hybrid search across all ingested OPR rule chunks.
 
@@ -104,13 +105,20 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             game_system: Optional filter, one of "gf" (Grimdark Future), "aof"
                 (Age of Fantasy), "gff" (Firefight), "skirmish", or "core".
             army: Optional army-name filter (case-sensitive).
+            version: Optional version pin (e.g. "3.5.3"). When omitted, only
+                the latest version of each (game_system, army) book is searched.
         """
         return search_rules_tool.run(
-            _db(), query, limit=limit, game_system=game_system, army=army
+            _db(), query, limit=limit, game_system=game_system, army=army,
+            version=version,
         )
 
     @mcp_obj.tool()
-    def lookup_unit(name: str, army: str | None = None) -> list[dict[str, Any]]:
+    def lookup_unit(
+        name: str,
+        army: str | None = None,
+        version: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Look up an OPR unit by name. Returns structured stats and equipment.
 
         Use this when the user names a specific unit and wants its profile. Returns
@@ -119,11 +127,18 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         Args:
             name: Unit name (or substring). Case-insensitive.
             army: Optional army filter to disambiguate.
+            version: Optional version pin (e.g. "3.5.3"). When omitted, only the
+                latest army-book version contributes results.
         """
-        return lookup_unit_tool.run(_db(), name, army=army)
+        return lookup_unit_tool.run(_db(), name, army=army, version=version)
 
     @mcp_obj.tool()
-    def get_special_rule(name: str, scope: str | None = None) -> dict[str, Any] | None:
+    def get_special_rule(
+        name: str,
+        scope: str | None = None,
+        game_system: str | None = None,
+        version: str | None = None,
+    ) -> dict[str, Any] | None:
         """Look up a single special rule by exact name (case-insensitive).
 
         Strips parametric suffixes, so "Tough(3)" and "Tough" both resolve to the
@@ -133,8 +148,13 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         Args:
             name: Rule name, with or without "(X)" parameter (e.g. "Tough" or "Tough(3)").
             scope: Optional scope filter (e.g. "core" or "army:Custodian Brothers").
+            game_system: Optional game-system filter.
+            version: Optional version pin. When omitted, only the latest version
+                of each (game_system, army) source is searched.
         """
-        return get_special_rule_tool.run(_db(), name, scope=scope)
+        return get_special_rule_tool.run(
+            _db(), name, scope=scope, game_system=game_system, version=version,
+        )
 
     @mcp_obj.tool()
     def list_armies() -> list[dict[str, Any]]:
@@ -142,9 +162,15 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         return lists_tool.list_armies(_db())
 
     @mcp_obj.tool()
-    def list_units(army: str) -> list[dict[str, Any]]:
-        """List all units for a given army (case-insensitive match on army name)."""
-        return lists_tool.list_units(_db(), army)
+    def list_units(army: str, version: str | None = None) -> list[dict[str, Any]]:
+        """List all units for a given army (case-insensitive match on army name).
+
+        Args:
+            army: Army name (case-insensitive).
+            version: Optional version pin. When omitted, only units from the
+                latest army-book version are returned.
+        """
+        return lists_tool.list_units(_db(), army, version=version)
 
     @mcp_obj.tool()
     def list_documents() -> list[dict[str, Any]]:

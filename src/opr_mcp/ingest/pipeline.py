@@ -72,10 +72,20 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
     meta = detect_metadata(path)
     pages = page_count(path)
 
+    # Prefer the Forge-recorded version when this PDF is a Forge mirror; the
+    # banner regex strips the leading "V" but Forge's versionString may carry
+    # extra precision (or fix typos in older books).
+    forge_meta = conn.execute(
+        "SELECT version FROM forge_books WHERE local_path = ? "
+        "ORDER BY last_changed DESC LIMIT 1",
+        (str(path),),
+    ).fetchone()
+    version = (forge_meta["version"] if forge_meta else None) or meta.get("version")
+
     cur = conn.execute(
         """
-        INSERT INTO documents (path, filename, sha256, game_system, title, army, page_count, ingested_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO documents (path, filename, sha256, game_system, title, army, version, page_count, ingested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(path),
@@ -84,6 +94,7 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
             meta["game_system"],
             meta["title"],
             meta["army"],
+            version,
             pages,
             dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         ),
