@@ -165,7 +165,7 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
                             anchor,
                             r.name,
                             1 if r.parametric else 0,
-                            "core" if meta["game_system"] == "core" else f"army:{meta['army']}",
+                            "core" if meta["army"] is None else f"army:{meta['army']}",
                             r.description,
                         ),
                     )
