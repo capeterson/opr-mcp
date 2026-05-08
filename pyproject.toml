@@ -15,6 +15,7 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     "platformdirs>=4.0.0",
     "numpy>=1.26.0",
+    "watchdog>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -44,4 +45,6 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
-ignore = ["E501"]
+# E501: long lines are OK (line-length is just a hint).
+# B008: typer expresses CLI options as call-expression defaults; this is the documented idiom.
+ignore = ["E501", "B008"]

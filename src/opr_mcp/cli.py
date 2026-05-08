@@ -102,8 +102,33 @@ def stats() -> None:
 
 
 @app.command()
-def serve() -> None:
-    """Start the MCP server on stdio."""
+def serve(
+    pdf_dir: Path | None = typer.Option(
+        None,
+        "--pdf-dir",
+        envvar="OPR_MCP_PDF_DIR",
+        help="Directory of PDFs to ingest on startup. Created if missing.",
+    ),
+    watch: bool = typer.Option(
+        False,
+        "--watch/--no-watch",
+        envvar="OPR_MCP_WATCH",
+        help="After the startup ingest, watch --pdf-dir for changes and re-ingest automatically.",
+    ),
+) -> None:
+    """Start the MCP server on stdio.
+
+    With ``--pdf-dir`` (or ``OPR_MCP_PDF_DIR``), every PDF under that directory is
+    ingested before the server starts. Combine with ``--watch`` to keep the index
+    in sync while the server runs — used by the Docker image.
+    """
+    configure_logging()
+    if pdf_dir is not None:
+        from .watch import initial_ingest, start_watcher
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        initial_ingest(pdf_dir)
+        if watch:
+            start_watcher(pdf_dir)
     server.main()
 
 
