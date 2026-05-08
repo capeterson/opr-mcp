@@ -255,6 +255,117 @@ def test_sync_prunes_rows_for_books_no_longer_returned(tmp_db, tmp_path):
     assert not b_path.exists()
 
 
+def test_prune_also_drops_ingested_document_rows(tmp_db, tmp_path):
+    """A pruned PDF must also have its ingested document/chunks/vec rows removed,
+    or the index keeps answering from a book Forge no longer publishes.
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("DEAD", "Dead", [4])
+
+    with (
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    # Simulate the watcher having ingested it: insert a documents row + a
+    # chunk + a chunks_vec row at the same path.
+    local_path = conn.execute(
+        "SELECT local_path FROM forge_books WHERE uid='DEAD'"
+    ).fetchone()["local_path"]
+    conn.execute(
+        "INSERT INTO documents (path, filename, sha256, page_count, ingested_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (local_path, "dead.pdf", "h", 1, "2026-01-01"),
+    )
+    doc_id = conn.execute("SELECT id FROM documents WHERE path=?", (local_path,)).fetchone()[0]
+    conn.execute(
+        "INSERT INTO chunks (document_id, page, section_type, section_title, text, token_count) "
+        "VALUES (?, 1, 'general', 'h', 'body text', 2)",
+        (doc_id,),
+    )
+    chunk_id = conn.execute("SELECT id FROM chunks WHERE document_id=?", (doc_id,)).fetchone()[0]
+    # chunks_vec needs a 384-float blob, but we just need a row; fake blob.
+    import numpy as np
+    blob = np.zeros(384, dtype=np.float32).tobytes()
+    conn.execute("INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)", (chunk_id, blob))
+    conn.commit()
+
+    # Second scan: book is gone. Pruning should clear forge_books, the on-disk
+    # PDF, the documents row, and the chunks_vec entry.
+    with (
+        patch.object(api, "list_books", return_value=[_book("OTHER", "Other", [4])]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert conn.execute("SELECT COUNT(*) FROM forge_books WHERE uid='DEAD'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM documents WHERE path=?", (local_path,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM chunks WHERE document_id=?", (doc_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM chunks_vec WHERE rowid=?", (chunk_id,)).fetchone()[0] == 0
+
+
+def test_prune_skipped_for_filter_with_empty_response(tmp_db, tmp_path):
+    """If `filters=['official','community']` and community returns empty while
+    official has data, community rows from a prior scan must not be pruned.
+    """
+    conn = db.open_db(tmp_db)
+    official = _book("O", "Official", [4], official=True)
+    community = _book("C", "Community", [4], official=False)
+
+    # First scan: both filters populated.
+    with (
+        patch.object(api, "list_books", side_effect=lambda f: [official] if f == "official" else [community]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, filters=["official", "community"], game_systems=[4])
+    assert conn.execute("SELECT COUNT(*) FROM forge_books").fetchone()[0] == 2
+
+    # Second scan: official still has the book, community returns empty (transient).
+    # Pruning must skip the community scope entirely; the community row survives.
+    with (
+        patch.object(api, "list_books", side_effect=lambda f: [official] if f == "official" else []),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, filters=["official", "community"], game_systems=[4])
+
+    rows = {(r["uid"], r["official"]) for r in conn.execute("SELECT uid, official FROM forge_books")}
+    assert rows == {("O", 1), ("C", 0)}
+
+
+def test_no_download_disables_pruning(tmp_db, tmp_path):
+    """`forge-scan --no-download` is a dry run; it must not delete files or rows."""
+    conn = db.open_db(tmp_db)
+    book = _book("KEEP", "Keep", [4])
+
+    # Seed the DB + filesystem with a book.
+    with (
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+    pdf_path = tmp_path / sync.local_filename(book, 4)
+    assert pdf_path.exists()
+
+    # Dry-run scan where the book has disappeared. With prune=False, files
+    # and rows must remain.
+    with (
+        patch.object(api, "list_books", return_value=[]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=AssertionError("must not be called")),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4], download=False, prune=False)
+
+    assert stats.pruned == 0
+    assert pdf_path.exists()
+    assert conn.execute("SELECT COUNT(*) FROM forge_books WHERE uid='KEEP'").fetchone()[0] == 1
+
+
 def test_sync_skips_pruning_when_listing_returns_empty(tmp_db, tmp_path):
     """A spuriously-empty listing response must not nuke previously mirrored books."""
     conn = db.open_db(tmp_db)

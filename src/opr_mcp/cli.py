@@ -198,7 +198,8 @@ def forge_scan(
     ),
     no_download: bool = typer.Option(
         False, "--no-download",
-        help="Update the forge_books table but don't actually download any PDFs.",
+        help="Dry-run: update the forge_books table but don't download any PDFs "
+             "and don't prune stale rows.",
     ),
 ) -> None:
     """One-shot Army Forge scan: refresh the local PDF mirror.
@@ -221,6 +222,7 @@ def forge_scan(
         filters=fcfg.filters(),
         game_systems=fcfg.games(),
         download=not no_download,
+        prune=not no_download,
     )
     typer.echo(
         f"Forge scan: {stats.new} new, {stats.changed} changed, "

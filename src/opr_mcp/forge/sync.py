@@ -128,6 +128,30 @@ def _official_scope_for_filters(filters: list[str]) -> list[int]:
     return scope
 
 
+def _delete_ingested_document(conn: sqlite3.Connection, local_path: str) -> None:
+    """Drop the ``documents`` row (and chunks_vec siblings) for a pruned PDF.
+
+    Mirrors what `opr-mcp remove` does: the chunks/units/special_rules tables
+    cascade, but the ``chunks_vec`` virtual table has no FK so we clean it
+    explicitly. Without this, the document remains searchable until a manual
+    remove or DB rebuild.
+    """
+    row = conn.execute(
+        "SELECT id FROM documents WHERE path = ?", (local_path,),
+    ).fetchone()
+    if row is None:
+        return
+    doc_id = row["id"]
+    chunk_ids = [
+        r[0] for r in conn.execute(
+            "SELECT id FROM chunks WHERE document_id = ?", (doc_id,),
+        ).fetchall()
+    ]
+    for cid in chunk_ids:
+        conn.execute("DELETE FROM chunks_vec WHERE rowid = ?", (cid,))
+    conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+
+
 def _prune_stale(
     conn: sqlite3.Connection,
     *,
@@ -135,7 +159,8 @@ def _prune_stale(
     filters: list[str],
     expected: set[tuple[str, int]],
 ) -> int:
-    """Remove forge_books rows + downloaded files for pairs that didn't appear.
+    """Remove forge_books rows, downloaded files, and ingested-document rows
+    for pairs that didn't appear in this scan.
 
     Scope is restricted to ``(game_system ∈ target_gs)`` and
     ``(official ∈ filter scope)`` so a partial scan (e.g. only ``--filter
@@ -157,16 +182,19 @@ def _prune_stale(
         key = (r["uid"], r["game_system"])
         if key in expected:
             continue
-        if r["local_path"]:
-            p = Path(r["local_path"])
+        local_path = r["local_path"]
+        if local_path:
+            p = Path(local_path)
             try:
                 if p.exists():
                     p.unlink()
             except OSError as exc:
                 log.warning("forge: could not remove stale %s: %s", p, exc)
+            _delete_ingested_document(conn, local_path)
         conn.execute(
             "DELETE FROM forge_books WHERE uid = ? AND game_system = ?", key,
         )
+        conn.commit()
         pruned += 1
         log.info("forge: pruned stale book uid=%s gs=%d", *key)
     return pruned
@@ -198,10 +226,13 @@ def sync(
 
     seen_uids: set[str] = set()
     all_books: list[dict] = []
+    filters_with_data: list[str] = []
     for filt in filters:
         log.info("forge: listing %s books", filt)
         books = api.list_books(filt)
         log.info("forge: %d %s books returned", len(books), filt)
+        if books:
+            filters_with_data.append(filt)
         for book in books:
             uid = book.get("uid")
             if not uid or uid in seen_uids:
@@ -302,15 +333,23 @@ def sync(
                     last_changed,
                 ),
             )
+            # Commit per row so the SQLite write lock isn't held across the
+            # network downloads of subsequent pairs — otherwise a `serve
+            # --watch --forge-sync` ingest on a separate connection can hit
+            # `database is locked` mid-scan.
+            conn.commit()
 
-    # Prune stale rows only when listing actually returned content. If the
-    # listing call returned an empty catalog (a transient API blip can do
-    # this without raising), preserve previously mirrored rows rather than
-    # nuking the corpus.
-    if prune and all_books:
+    # Prune only filters that actually returned books. If `OPR_MCP_FORGE_FILTERS`
+    # is `official,community` and the community catalog transiently 500s back to
+    # an empty list while official has data, we'd otherwise treat every
+    # community row as stale.
+    if prune and filters_with_data:
         expected = {(b["uid"], g) for (b, g) in pairs}
         stats.pruned = _prune_stale(
-            conn, target_gs=target_gs, filters=filters, expected=expected,
+            conn,
+            target_gs=target_gs,
+            filters=filters_with_data,
+            expected=expected,
         )
 
     conn.commit()
