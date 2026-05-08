@@ -24,9 +24,30 @@ _UNIT_NAME_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Equipment line pattern: "Name (range, attacks, special)" e.g. "Rifle (24\", A1, AP(1))"
-_EQUIP_LINE_RE = re.compile(
-    r"^(?P<count>\d+x\s+)?(?P<name>[A-Za-z][\w\-' ]{2,40}?)\s*\((?P<body>[^)]+)\)\s*$"
+# Equipment token: "[Nx ]Name (body)" where ``body`` may contain ONE level of
+# nested parens (real OPR weapons commonly have "AP(N)", "Blast(N)",
+# "Reliable", etc. inside their stat block, e.g. ``Rifle (24", A1, AP(1))``).
+# Used with ``finditer`` so multiple weapons on a single comma-joined line all
+# get captured.
+_EQUIP_TOKEN_RE = re.compile(
+    r"""
+    (?P<count>\d+x\s+)?
+    (?P<name>[A-Z][A-Za-z'\-/ ]{1,40}?)
+    \s*\(
+        (?P<body>(?:[^()]|\([^()]*\))+)
+    \)
+    """,
+    re.VERBOSE,
+)
+# A weapon's body always includes at least an attacks marker like ``A1``/``A2``.
+# Without this filter, parametric *rules* like ``Tough(3)`` masquerade as
+# weapons named "Tough".
+_WEAPON_ATTACKS_RE = re.compile(r"\bA\d+\b")
+# Rule token: ``Furious``, ``Tough(3)``, ``AP(2)``, ``Bestial Boost``. Used to
+# identify a bare comma-separated rules line on a unit card (no ``Rules:``
+# prefix, which real OPR army-book cards omit).
+_RULE_TOKEN_RE = re.compile(
+    r"^[A-Z][A-Za-z' \-]{0,30}(?:\(\s*[A-Za-z0-9+]{1,8}\s*\))?$"
 )
 
 # Two glossary formats observed in real OPR PDFs:
@@ -150,24 +171,68 @@ def parse_unit(section: Section) -> ParsedUnit | None:
                 pts = None
 
     equipment: list[dict] = []
-    for line in text.splitlines():
-        s = line.strip()
-        em = _EQUIP_LINE_RE.match(s)
-        if em:
-            equipment.append({
-                "name": em.group("name").strip(),
-                "details": em.group("body").strip(),
-            })
-
+    seen_equipment: set[tuple[str, str]] = set()
     rules: list[str] = []
+    seen_rules: set[str] = set()
+
+    def _add_rule(tok: str) -> None:
+        tok = tok.strip()
+        if not tok:
+            return
+        key = tok.lower()
+        if key in seen_rules:
+            return
+        seen_rules.add(key)
+        rules.append(tok)
+
     for line in text.splitlines():
         s = line.strip()
+        if not s:
+            continue
+
+        # Skip the name+stats lines so they don't get scanned for weapons/rules.
+        if _UNIT_NAME_LINE_RE.match(s) or _QUALITY_DEF_RE.search(s):
+            continue
+
+        # Equipment: scan for every "Name (body)" token on the line where the
+        # body has a weapon-attacks marker. ``finditer`` handles comma-joined
+        # weapons on a single line and ``_WEAPON_ATTACKS_RE`` keeps parametric
+        # rules like ``Tough(3)`` from being mis-classified as a weapon.
+        line_had_weapon = False
+        for em in _EQUIP_TOKEN_RE.finditer(s):
+            body = em.group("body").strip()
+            if not _WEAPON_ATTACKS_RE.search(body):
+                continue
+            line_had_weapon = True
+            name_tok = em.group("name").strip()
+            key = (name_tok.lower(), body.lower())
+            if key in seen_equipment:
+                continue
+            seen_equipment.add(key)
+            equipment.append({"name": name_tok, "details": body})
+
+        if line_had_weapon:
+            continue
+
+        # Explicit ``Rules:`` / ``Special:`` prefix (older / synthetic format).
         if s.startswith("Rules:") or s.startswith("Special:"):
-            rest = s.split(":", 1)[1]
-            for tok in re.split(r",|;", rest):
-                tok = tok.strip()
-                if tok:
-                    rules.append(tok)
+            for tok in re.split(r",|;", s.split(":", 1)[1]):
+                _add_rule(tok)
+            continue
+
+        # Bare rule line: ``Tough(3), Furious, Hero``. Real OPR army-book unit
+        # cards print rules without any prefix at the bottom of the card. We
+        # accept a line as a rules line when every comma/semicolon-separated
+        # token looks like a rule name and there are either >=2 tokens or at
+        # least one parametric token — that filters out incidental TitleCase
+        # phrases (e.g. a stray unit-name fragment).
+        tokens = [t.strip() for t in re.split(r"[,;]", s) if t.strip()]
+        if not tokens or not all(_RULE_TOKEN_RE.match(t) for t in tokens):
+            continue
+        if len(tokens) < 2 and not any("(" in t for t in tokens):
+            continue
+        for tok in tokens:
+            _add_rule(tok)
 
     return ParsedUnit(
         name=name.strip(),

@@ -27,6 +27,49 @@ def test_parse_unit_returns_none_without_stat_line():
     assert parse_unit(s) is None
 
 
+def test_parse_unit_equipment_with_nested_parens():
+    """Real OPR weapons have AP(N)/Blast(N)/etc. inside the stat block."""
+    s = _section(
+        "Kemba Brute Boss [1] - 140pts\n"
+        "Quality 4+   Defense 4+\n"
+        "Heavy Bolter (24\", A2, AP(1))\n"
+        "Plasma Pistol (12\", A1, AP(2))\n"
+        "Tough(3), Furious, Hero\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert u.name == "Kemba Brute Boss"
+    assert u.qty == 1
+    assert u.base_points == 140
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Heavy Bolter", "Plasma Pistol"}.issubset(eq_names), eq_names
+    hb = next(e for e in u.equipment if e["name"] == "Heavy Bolter")
+    assert "AP(1)" in hb["details"]
+    # Bare rules line (no "Rules:" prefix) should also be captured.
+    assert "Tough(3)" in u.rules
+    assert "Furious" in u.rules
+    assert "Hero" in u.rules
+    # Tough(3) must not leak into equipment as a "Tough" weapon.
+    assert all(e["name"].lower() != "tough" for e in u.equipment)
+
+
+def test_parse_unit_inline_comma_joined_weapons():
+    """Multiple weapons on a single comma-joined line."""
+    s = _section(
+        "Battle Brothers [5] - 90pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1), Pistol (12\", A1), CCW (A1)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Rifle", "Pistol", "CCW"}.issubset(eq_names), eq_names
+    assert "Tough(3)" in u.rules
+
+
 def test_parse_special_rules_glossary():
     sec = Section(
         section_type="special_rule",
