@@ -224,6 +224,111 @@ def test_parse_unit_suffixed_attack_marker():
     assert "Heavy Cannon" in eq_names, eq_names
 
 
+def test_parse_unit_in_profile_heading_does_not_terminate():
+    """``Equipment`` / ``Weapons`` as in-profile column labels are skipped, not boundaries."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Equipment\n"
+        "Rifle (24\", A1)\n"
+        "Special Rules\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Rifle" in eq_names, eq_names
+    assert "Tough(3)" in u.rules
+
+
+def test_parse_unit_equipment_name_with_digits():
+    """Names like 'MG42' or 'C4 Charges' must register as equipment."""
+    s = _section(
+        "Heavy Squad [5] - 130pts\n"
+        "Quality 4+   Defense 5+\n"
+        "MG42 (24\", A3)\n"
+        "C4 Charges (A1, AP(4))\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"MG42", "C4 Charges"}.issubset(eq_names), eq_names
+
+
+def test_parse_unit_salvages_weapon_when_rule_sibling_present():
+    """``CCW (A2), Tough(3)`` keeps the weapon AND captures the rule."""
+    s = _section(
+        "Brute [1] - 75pts\n"
+        "Quality 4+   Defense 4+\n"
+        "CCW (A2), Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert "CCW" in eq_names, eq_names
+    # And the parametric rule is captured, not lost.
+    assert "Tough(3)" in u.rules
+    # Tough must NOT be an equipment item.
+    assert "Tough" not in eq_names
+
+
+def test_parse_unit_textual_param_rule_routes_to_rules():
+    """``Aura(Friendly)`` style rules with alphabetic params are NOT equipment."""
+    s = _section(
+        "Beacon [1] - 60pts\n"
+        "Quality 4+   Defense 4+\n"
+        "CCW (A1)\n"
+        "Aura(Friendly), Beacon(Allies), Hero\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Aura" not in eq_names
+    assert "Beacon" not in eq_names
+    rule_set = set(u.rules)
+    assert "Aura(Friendly)" in rule_set, u.rules
+    assert "Beacon(Allies)" in rule_set, u.rules
+    assert "Hero" in rule_set
+
+
+def test_parse_unit_keeps_leading_defensive_equipment():
+    """Defensive gear listed BEFORE the first weapon is preserved."""
+    s = _section(
+        "Shield Bearer [1] - 90pts\n"
+        "Quality 3+   Defense 3+\n"
+        "Combat Shield (Shield Wall)\n"
+        "CCW (A2)\n"
+        "Hero, Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Combat Shield", "CCW"}.issubset(eq_names), eq_names
+
+
+def test_parse_unit_keeps_lone_rule_before_equipment():
+    """A lone bare rule like ``Hero`` BEFORE any equipment line is preserved."""
+    s = _section(
+        "Champion [1] - 80pts\n"
+        "Quality 3+   Defense 4+\n"
+        "Hero\n"
+        "CCW (A3)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Hero" in u.rules
+    assert "Tough(3)" in u.rules
+    assert {"CCW"}.issubset({e["name"] for e in u.equipment})
+
+
 def test_parse_unit_strips_count_prefix_on_rule_tokens():
     """Per-model count prefix on rules ('10x Furious') must be tolerated."""
     s = _section(
