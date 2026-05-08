@@ -75,7 +75,9 @@ _TABLE_HEADER_WORDS = frozenset({
 # up as a unit rule.
 _PROFILE_BOUNDARY_HEADINGS = frozenset({
     "upgrades", "options",
-    "army special rules", "army wide special rule", "army-wide special rule",
+    "army special rules",
+    "army-wide special rule", "army-wide special rules",
+    "army wide special rule", "army wide special rules",
     "psychic powers", "spell list", "spells",
 })
 # In-profile headings: column/section labels that can appear WITHIN a unit's
@@ -104,8 +106,20 @@ def _normalize_heading(line: str) -> str:
 
 
 def _is_profile_boundary(line: str) -> bool:
-    """True if ``line`` is a heading that ends the unit's profile scan."""
-    return _normalize_heading(line) in _PROFILE_BOUNDARY_HEADINGS
+    """True if ``line`` is a heading that ends the unit's profile scan.
+
+    Multi-word headings also match by prefix so a glued line like
+    ``ARMY-WIDE SPECIAL RULE Repel Ambushers: ...`` still terminates —
+    PDF extraction sometimes joins the heading and the first rule onto a
+    single line.
+    """
+    norm = _normalize_heading(line)
+    if norm in _PROFILE_BOUNDARY_HEADINGS:
+        return True
+    return any(
+        " " in h and norm.startswith(h + " ")
+        for h in _PROFILE_BOUNDARY_HEADINGS
+    )
 
 
 def _is_inprofile_heading(line: str) -> bool:
@@ -230,6 +244,23 @@ def _parse_paren_line(line: str) -> tuple[list[dict], list[str]] | None:
             rule_tokens.append(f"{name}({body})")
         else:
             equipment.append({"name": name, "details": body})
+    # Reclassification for textual-param rule lists. A standalone
+    # ``Cloak (Stealth)`` is gear (kept as equipment by the per-item
+    # classifier), but a line composed entirely of ``Aura(Friendly),
+    # Beacon(Allies)``-style tokens (>=2 items, no weapon, every item a
+    # single-word name with a single alphabetic-word body) reads as a
+    # rules list, not a list of gear items.
+    if (
+        len(raw_items) >= 2
+        and not any(_WEAPON_ATTACKS_RE.search(b) for _, b in raw_items)
+        and all(
+            " " not in n.strip()
+            and "(" not in b
+            and re.fullmatch(r"[A-Za-z]+", b.strip()) is not None
+            for n, b in raw_items
+        )
+    ):
+        return [], [f"{n}({b})" for n, b in raw_items]
     return equipment, rule_tokens
 
 
@@ -468,16 +499,19 @@ def parse_unit(section: Section) -> ParsedUnit | None:
                     in_stat_block = True
                     continue
 
-        # All non-paren-line processing is gated on past_stats_line so
-        # pre-profile flavor text never leaks into rules_json.
-        if not past_stats_line:
-            continue
-
-        # Explicit ``Rules:`` / ``Special:`` prefix (older / synthetic format).
+        # Explicit ``Rules:`` / ``Special:`` prefix (older / synthetic
+        # format). The prefix is unambiguous, so this runs before the
+        # past_stats_line gate — a unit whose extraction puts the rule
+        # column above the Q/D line still has its rules picked up.
         if s.startswith("Rules:") or s.startswith("Special:"):
             for tok in re.split(r",|;", s.split(":", 1)[1]):
                 _add_rule(tok)
             in_stat_block = True
+            continue
+
+        # All other non-paren-line processing is gated on past_stats_line
+        # so pre-profile flavor text never leaks into rules_json.
+        if not past_stats_line:
             continue
 
         # Stat-table column header (``Weapon Range Attacks AP Special``).
@@ -502,6 +536,12 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         ]
         tokens = [t for t in tokens if t]
         if not tokens or not all(_RULE_TOKEN_RE.match(t) for t in tokens):
+            continue
+        # Reject ALL-CAPS section headings (``AURA SPECIAL RULES``) that
+        # technically pass _RULE_TOKEN_RE — they slip in when PDF
+        # extraction glues a trailing army-wide rules block onto the
+        # unit's last block. Reuse the glossary parser's filter.
+        if not all(_looks_like_rule_name(t) for t in tokens):
             continue
         # A single non-parametric token (lone ``Hero``) only counts once we
         # already know we're inside the unit's stat block (set by the

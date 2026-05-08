@@ -472,6 +472,94 @@ def test_parse_unit_skips_stat_table_header():
     assert "Furious" in u.rules
 
 
+def test_parse_unit_all_textual_param_line_routes_to_rules():
+    """All-paren textual-param line (no Hero fallthrough) lands in rules."""
+    s = _section(
+        "Beacon [1] - 60pts\n"
+        "Quality 4+   Defense 4+\n"
+        "CCW (A1)\n"
+        "Aura(Friendly), Beacon(Allies)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Aura(Friendly)" in rule_set, u.rules
+    assert "Beacon(Allies)" in rule_set, u.rules
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Aura" not in eq_names
+    assert "Beacon" not in eq_names
+
+
+def test_parse_unit_plural_army_wide_heading_is_a_boundary():
+    """``Army-Wide Special Rules`` (plural) terminates the scan."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "Army-Wide Special Rules\n"
+        "Repel Ambushers\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    assert "army-wide special rules" not in rule_set
+    assert "repel ambushers" not in rule_set
+
+
+def test_parse_unit_inline_boundary_heading():
+    """Heading + inline content (``ARMY-WIDE SPECIAL RULE Repel ...``) terminates."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "ARMY-WIDE SPECIAL RULE Repel Ambushers: gain Counter\n"
+        "Some More Aura Rule\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    # The inline-heading line and what follows must NOT show up.
+    assert all("repel" not in r for r in rule_set)
+    assert "some more aura rule" not in rule_set
+
+
+def test_parse_unit_rejects_all_caps_section_heading():
+    """``AURA SPECIAL RULES`` style headings must not be captured as rules."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "AURA SPECIAL RULES\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    assert "aura special rules" not in rule_set
+
+
+def test_parse_unit_keeps_pre_stats_rules_prefix():
+    """A ``Rules:`` line ABOVE the Q/D stat line is preserved."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Rules: Tough(3), Furious\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Tough(3)" in rule_set
+    assert "Furious" in rule_set
+
+
 def test_parse_unit_strips_count_prefix_on_rule_tokens():
     """Per-model count prefix on rules ('10x Furious') must be tolerated."""
     s = _section(
