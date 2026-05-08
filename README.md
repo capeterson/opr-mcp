@@ -80,6 +80,33 @@ Environment variables (all optional):
 - `OPR_MCP_EMBED_MODEL` — override the embedding model. Must be 384-dim or you
   will need to rebuild the DB.
 - `OPR_MCP_LOG_LEVEL` — `INFO` by default.
+- `OPR_MCP_PDF_DIR` — directory of PDFs ingested at startup (used by `serve`).
+- `OPR_MCP_WATCH` — when truthy and `OPR_MCP_PDF_DIR` is set, the server
+  re-ingests automatically when PDFs are added/changed/removed.
+
+## Docker
+
+A prebuilt image is published to GHCR; `:dev` always tracks the latest build.
+
+```bash
+docker run --rm -i \
+  -v /path/to/your/opr-pdfs:/data/pdfs:ro \
+  -v opr-mcp-db:/data/db \
+  -v opr-mcp-hf:/data/hf-cache \
+  ghcr.io/capeterson/opr-mcp:dev
+```
+
+The container mounts:
+
+- `/data/pdfs` — your PDF corpus (read-only is fine). Indexed on startup and
+  re-indexed automatically on file changes.
+- `/data/db` — SQLite index. Persist this volume to avoid re-ingesting.
+- `/data/hf-cache` — HuggingFace cache for the embedding model. Persist to
+  avoid re-downloading the ~130 MB model on every container restart.
+
+The default `CMD` is `serve`, which honors `OPR_MCP_PDF_DIR=/data/pdfs` and
+`OPR_MCP_WATCH=1` (both set in the image). To use it with Claude Desktop /
+Claude Code, point your MCP config at `docker run … ghcr.io/capeterson/opr-mcp:dev`.
 
 ## Tests
 

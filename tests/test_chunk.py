@@ -1,4 +1,4 @@
-from opr_mcp.ingest.chunk import Chunk, chunk_blocks
+from opr_mcp.ingest.chunk import chunk_blocks
 from opr_mcp.ingest.pdf import PageBlock
 
 

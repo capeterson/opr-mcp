@@ -61,9 +61,7 @@ def _looks_like_rule_name(name: str) -> bool:
     bare = name.strip()
     if len(bare) < 2:
         return False
-    if len(bare) > 3 and bare.upper() == bare and any(c.isalpha() for c in bare):
-        return False
-    return True
+    return not (len(bare) > 3 and bare.upper() == bare and any(c.isalpha() for c in bare))
 # Lines/paragraphs to ignore when scanning glossary blocks: section headers,
 # bare page numbers, the literal "SPECIAL RULES" banner.
 _SKIP_PARA_RE = re.compile(r"^(?:\d+|SPECIAL RULES|Special Rules)\s*$")

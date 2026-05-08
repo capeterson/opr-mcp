@@ -1,5 +1,5 @@
-from opr_mcp.ingest.pdf import PageBlock
 from opr_mcp.ingest.parse_units import parse_special_rules, parse_unit
+from opr_mcp.ingest.pdf import PageBlock
 from opr_mcp.ingest.segment import Section
 
 

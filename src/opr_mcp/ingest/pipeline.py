@@ -85,7 +85,7 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
             meta["title"],
             meta["army"],
             pages,
-            dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         ),
     )
     doc_id = cur.lastrowid
@@ -107,7 +107,7 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
 
     if chunks:
         vecs = embeddings.encode([c.text for c in chunks])
-        for cid, vec in zip(chunk_ids, vecs):
+        for cid, vec in zip(chunk_ids, vecs, strict=True):
             conn.execute(
                 "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
                 (cid, embeddings.to_blob(vec)),
