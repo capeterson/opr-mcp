@@ -15,3 +15,11 @@ build/
 
 # Local OPR PDF corpus — never commit licensed game content.
 opr-data/
+
+# Claude Code per-project wiring — skills live under skills/ and are aliased in
+# locally. See skills/README.md for the one-line setup.
+.claude/
+
+# The hard-linked SKILL.md alias inside each skill is a local-only Claude Code
+# discovery shim; the canonical content is AGENTS.md.
+skills/*/SKILL.md

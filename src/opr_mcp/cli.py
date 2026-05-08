@@ -1,4 +1,4 @@
-"""Typer CLI: `opr-mcp ingest|reingest|list|remove|stats|serve`."""
+"""Typer CLI: `opr-mcp ingest|reingest|list|remove|stats|serve|forge-scan`."""
 from __future__ import annotations
 
 import logging
@@ -116,6 +116,14 @@ def serve(
         envvar="OPR_MCP_WATCH",
         help="After the startup ingest, watch --pdf-dir for changes and re-ingest automatically.",
     ),
+    forge_sync: bool = typer.Option(
+        False,
+        "--forge-sync/--no-forge-sync",
+        envvar="OPR_MCP_FORGE_SYNC",
+        help="Periodically scan Army Forge for new/changed army-book PDFs and "
+             "drop them into <pdf-dir>/forge/. Interval is OPR_MCP_FORGE_INTERVAL_SECONDS "
+             "(default 12h).",
+    ),
     transport: str = typer.Option(
         "auto",
         "--transport",
@@ -132,17 +140,55 @@ def serve(
     With ``--pdf-dir`` (or ``OPR_MCP_PDF_DIR``), every PDF under that directory is
     ingested before the server starts. Combine with ``--watch`` to keep the index
     in sync while the server runs — used by the Docker image.
+
+    With ``--forge-sync`` (or ``OPR_MCP_FORGE_SYNC=1``), a background scheduler
+    polls Army Forge on the configured interval, downloads any (book,
+    game-system) pair whose ``renderId`` has changed since the last scan, and
+    drops the PDFs into the watched directory so the ingest pipeline picks
+    them up.
     """
     configure_logging()
     if transport not in {"auto", "stdio", "http"}:
         raise typer.BadParameter("--transport must be one of: auto, stdio, http")
-
+    if forge_sync and not watch:
+        raise typer.BadParameter(
+            "--forge-sync requires --watch (or OPR_MCP_WATCH=1): the scheduler "
+            "drops new PDFs into the corpus and the watcher is what feeds them "
+            "into the index. Without --watch, downloaded books would sit unused "
+            "until the next manual ingest."
+        )
+    watched: list[Path] = []
     if pdf_dir is not None:
         from .watch import initial_ingest, start_watcher
         pdf_dir.mkdir(parents=True, exist_ok=True)
         initial_ingest(pdf_dir)
         if watch:
             start_watcher(pdf_dir)
+        watched.append(pdf_dir.resolve())
+    if forge_sync:
+        from .forge import config as fcfg
+        from .forge.scheduler import ForgeScheduler
+        from .watch import initial_ingest, start_watcher
+        target = fcfg.pdf_dir(pdf_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        # If the forge target isn't under an already-watched dir, watch it
+        # too so downloaded books reach the ingest pipeline. Recursive
+        # watchers on a parent dir already cover subdirs.
+        target_resolved = target.resolve()
+        already_watched = any(
+            target_resolved == w or _is_under(target_resolved, w) for w in watched
+        )
+        if not already_watched:
+            initial_ingest(target)
+            start_watcher(target)
+            watched.append(target_resolved)
+        scheduler = ForgeScheduler(
+            pdf_dir=target,
+            interval_seconds=fcfg.interval_seconds(),
+            filters=fcfg.filters(),
+            game_systems=fcfg.games(),
+        )
+        scheduler.start()
 
     if host is not None:
         os.environ["OPR_MCP_HOST"] = host
@@ -168,6 +214,63 @@ def serve(
         )
     s = server.build_server(with_auth=cfg)
     s.run(transport="streamable-http")
+
+
+def _is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+@app.command(name="forge-scan")
+def forge_scan(
+    pdf_dir: Path | None = typer.Option(
+        None, "--pdf-dir", envvar="OPR_MCP_FORGE_PDF_DIR",
+        help="Where to download PDFs. Defaults to <OPR_MCP_PDF_DIR>/forge if "
+             "that env var is set, else a 'forge-pdfs' folder under the user "
+             "data dir.",
+    ),
+    no_download: bool = typer.Option(
+        False, "--no-download",
+        help="Dry-run: update the forge_books table but don't download any PDFs "
+             "and don't prune stale rows.",
+    ),
+) -> None:
+    """One-shot Army Forge scan: refresh the local PDF mirror.
+
+    Honors ``OPR_MCP_FORGE_FILTERS`` (default ``official``) and
+    ``OPR_MCP_FORGE_GAMES`` (default: every known game system). The scan
+    enumerates every ``(book, game_system)`` pair where the book is enabled
+    for that system and downloads the ones whose ``renderId`` differs from
+    what the DB last recorded.
+    """
+    configure_logging()
+    from .forge import config as fcfg
+    from .forge import sync as fsync
+    serve_dir = Path(os.environ["OPR_MCP_PDF_DIR"]).expanduser() if os.environ.get("OPR_MCP_PDF_DIR") else None
+    target = pdf_dir or fcfg.pdf_dir(serve_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    conn = db.open_db()
+    stats = fsync.sync(
+        conn, target,
+        filters=fcfg.filters(),
+        game_systems=fcfg.games(),
+        download=not no_download,
+        prune=not no_download,
+    )
+    typer.echo(
+        f"Forge scan: {stats.new} new, {stats.changed} changed, "
+        f"{stats.unchanged} unchanged, {len(stats.failed)} failed "
+        f"(of {stats.seen} pair(s)). PDFs at {target}"
+    )
+    if stats.failed:
+        for name, err in stats.failed[:10]:
+            typer.echo(f"  ! {name}: {err}")
+        # Non-zero exit so cron / CI can distinguish a partial mirror from a
+        # clean run and trigger a retry instead of moving on.
+        raise typer.Exit(code=1)
 
 
 def _print_summary(stats: IngestStats) -> None:

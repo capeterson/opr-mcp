@@ -88,6 +88,23 @@ END;
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
     embedding float[{EMBED_DIM}]
 );
+
+CREATE TABLE IF NOT EXISTS forge_books (
+    uid           TEXT NOT NULL,
+    game_system   INTEGER NOT NULL,
+    name          TEXT,
+    faction       TEXT,
+    version       TEXT,
+    official      INTEGER NOT NULL DEFAULT 1,
+    pdf_filename  TEXT,
+    pdf_path      TEXT,
+    render_id     TEXT,
+    local_path    TEXT,
+    last_checked  TEXT NOT NULL,
+    last_changed  TEXT NOT NULL,
+    PRIMARY KEY (uid, game_system)
+);
+CREATE INDEX IF NOT EXISTS idx_forge_changed ON forge_books(last_changed);
 """
 
 

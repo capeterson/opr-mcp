@@ -43,6 +43,54 @@ uv run opr-mcp remove core.pdf       # remove one document
 uv run opr-mcp reingest               # re-process every document at its known path
 ```
 
+## Auto-fetch from Army Forge
+
+`opr-mcp` can also pull army-book PDFs directly from OPR's
+[Army Forge](https://army-forge.onepagerules.com/) listing API, mirror them
+into the watched PDF directory, and refresh them when OPR regenerates a
+book. Useful if you want to avoid hand-curating the corpus.
+
+```bash
+# One-shot scan: enumerate every (book, game-system) pair, resolve the current
+# PDF, download anything that's new or whose renderId has changed since last
+# scan, and stash it under the configured forge directory.
+uv run opr-mcp forge-scan
+```
+
+Background mode runs the same scan on an interval inside `serve`:
+
+```bash
+OPR_MCP_PDF_DIR=/path/to/your/opr-pdfs \
+  uv run opr-mcp serve --watch --forge-sync
+```
+
+`--forge-sync` (or `OPR_MCP_FORGE_SYNC=1`) starts a daemon thread that scans
+every 12 hours by default and writes new/changed PDFs into
+`<OPR_MCP_PDF_DIR>/forge/`. Combined with `--watch`, the existing recursive
+watcher picks them up and feeds them through the normal ingest pipeline.
+
+How change detection works: the PDF URL embeds a rotating `renderId` nanoid
+that flips whenever a book is regenerated (`army-books/pdfs/<uid>~<gs>/<renderId>.pdf`).
+A scan compares each pair's current `renderId` against what was recorded in
+the local `forge_books` table; only differing ones get downloaded.
+
+### Forge env vars (all optional)
+
+- `OPR_MCP_FORGE_SYNC` — opt-in flag for the background scheduler in `serve`.
+  Truthy values: `1`, `true`, `yes`, `on`. Default: off.
+- `OPR_MCP_FORGE_INTERVAL_SECONDS` — scheduler interval. Default: `43200`
+  (12 hours). Minimum: 60.
+- `OPR_MCP_FORGE_FILTERS` — `official`, `community`, or both
+  (comma-separated). Default: `official`. The community catalog is large
+  (thousands of books); enable it deliberately.
+- `OPR_MCP_FORGE_GAMES` — comma-separated game-system slugs or numeric IDs
+  to scan. Default: every known system (`ftl,gf,gff,aof,aofs,aofr,aofq,aofqai,gfsq,gfsqai`).
+  A book contributes one PDF per game-system in its `enabledGameSystems`
+  intersected with this list.
+- `OPR_MCP_FORGE_PDF_DIR` — explicit destination. Default precedence:
+  `<OPR_MCP_PDF_DIR>/forge` if `OPR_MCP_PDF_DIR` is set, otherwise a
+  `forge-pdfs` folder under the platform user data dir.
+
 ## Use with Claude
 
 Add to your Claude Desktop / Claude Code MCP config:
@@ -83,6 +131,9 @@ Environment variables (all optional):
 - `OPR_MCP_PDF_DIR` — directory of PDFs ingested at startup (used by `serve`).
 - `OPR_MCP_WATCH` — when truthy and `OPR_MCP_PDF_DIR` is set, the server
   re-ingests automatically when PDFs are added/changed/removed.
+- Army Forge auto-fetch: see the
+  [Auto-fetch from Army Forge](#auto-fetch-from-army-forge) section above for
+  `OPR_MCP_FORGE_*` variables.
 
 ## Docker
 
@@ -100,13 +151,31 @@ The container mounts:
 
 - `/data/pdfs` — your PDF corpus (read-only is fine). Indexed on startup and
   re-indexed automatically on file changes.
+- `/data/forge-pdfs` — Army Forge auto-fetch destination. Only used when
+  `OPR_MCP_FORGE_SYNC=1`; must be writable in that case. Mount a named
+  volume (e.g. `-v opr-mcp-forge:/data/forge-pdfs`) so downloaded books
+  persist across restarts.
 - `/data/db` — SQLite index. Persist this volume to avoid re-ingesting.
 - `/data/hf-cache` — HuggingFace cache for the embedding model. Persist to
   avoid re-downloading the ~130 MB model on every container restart.
 
-The default `CMD` is `serve`, which honors `OPR_MCP_PDF_DIR=/data/pdfs` and
-`OPR_MCP_WATCH=1` (both set in the image). To use it with Claude Desktop /
-Claude Code, point your MCP config at `docker run … ghcr.io/capeterson/opr-mcp:dev`.
+The default `CMD` is `serve`, which honors `OPR_MCP_PDF_DIR=/data/pdfs`,
+`OPR_MCP_WATCH=1`, and `OPR_MCP_FORGE_PDF_DIR=/data/forge-pdfs` (all set in
+the image). To use it with Claude Desktop / Claude Code, point your MCP
+config at `docker run … ghcr.io/capeterson/opr-mcp:dev`.
+
+To turn on Army Forge auto-fetch in the container, add
+`-e OPR_MCP_FORGE_SYNC=1` and a writable forge-pdfs volume:
+
+```bash
+docker run --rm -i \
+  -v /path/to/your/opr-pdfs:/data/pdfs:ro \
+  -v opr-mcp-forge:/data/forge-pdfs \
+  -v opr-mcp-db:/data/db \
+  -v opr-mcp-hf:/data/hf-cache \
+  -e OPR_MCP_FORGE_SYNC=1 \
+  ghcr.io/capeterson/opr-mcp:dev
+```
 
 ## Remote deployment with Discord OAuth
 

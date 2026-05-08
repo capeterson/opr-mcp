@@ -53,17 +53,31 @@ def page_count(path: Path) -> int:
         return doc.page_count
 
 
+# `\bftl\b` rather than `"ftl" in lower` — substring search would match
+# unrelated words like "softly" or "swiftly" and misroute documents to
+# Warfleets.
+_FTL_TOKEN_RE = re.compile(r"\bftl\b")
+
 _BANNER_RE = re.compile(
-    r"^\s*(?P<sys>AOF|GF|GFF|FF|AOFS|GFS)\s*-\s*(?P<army>[A-Z][A-Z' &]+?)\s*V[\d.]+\s*$",
+    r"^\s*(?P<sys>AOFQAI|AOFQ|AOFR|AOFS|AOF|GFSQAI|GFSQ|GFS|GFF|FF|GF|FTL)"
+    r"\s*-\s*(?P<army>[A-Z][A-Z' &]+?)\s*V[\d.]+\s*$",
     re.MULTILINE,
 )
+# AI variants render the same army books with AI-friendly formatting; route
+# them to their non-AI counterparts so a roster filtered by `aofq` finds both.
 _SYSTEM_FROM_BANNER = {
     "AOF": "aof",
+    "AOFS": "skirmish",
+    "AOFR": "aofr",
+    "AOFQ": "aofq",
+    "AOFQAI": "aofq",
     "GF": "gf",
     "GFF": "gff",
     "FF": "gff",
-    "AOFS": "skirmish",
     "GFS": "skirmish",
+    "GFSQ": "gfsq",
+    "GFSQAI": "gfsq",
+    "FTL": "ftl",
 }
 
 
@@ -94,7 +108,9 @@ def detect_metadata(path: Path, sample_pages: int = 3) -> dict:
 
     lower = text.lower()
     game_system = None
-    if "grimdark future" in lower:
+    if "warfleets" in lower or _FTL_TOKEN_RE.search(lower):
+        game_system = "ftl"
+    elif "grimdark future" in lower:
         game_system = "gf"
     elif "age of fantasy" in lower:
         game_system = "aof"
