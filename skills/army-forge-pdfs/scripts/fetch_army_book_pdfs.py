@@ -116,13 +116,9 @@ def list_books(filt: str) -> list[dict]:
     return list(seen.values())
 
 
-def pick_game_system(book: dict, preferred: list[int]) -> int | None:
-    enabled = book.get("enabledGameSystems") or []
-    enabled_set = set(enabled)
-    for gid in preferred:
-        if gid in enabled_set:
-            return gid
-    return None
+def matching_game_systems(book: dict, preferred: list[int]) -> list[int]:
+    enabled = set(book.get("enabledGameSystems") or [])
+    return [gid for gid in preferred if gid in enabled]
 
 
 def resolve_pdf(uid: str, game_system: int) -> tuple[str, str]:
@@ -205,7 +201,6 @@ def main(argv: list[str] | None = None) -> int:
 
     target_ids = parse_game_arg(args.game)
     target_slugs = [GAME_SYSTEMS[g] for g in target_ids]
-    target_set = set(target_ids)
 
     print(f"Listing {args.filter} books...", file=sys.stderr)
     books = list_books(args.filter)
@@ -213,13 +208,12 @@ def main(argv: list[str] | None = None) -> int:
 
     matches: list[tuple[dict, int]] = []
     for book in books:
-        gid = pick_game_system(book, target_ids)
-        if gid is None:
-            continue
-        if gid not in target_set:
-            continue
-        matches.append((book, gid))
-    print(f"  {len(matches)} match the requested game system(s).", file=sys.stderr)
+        for gid in matching_game_systems(book, target_ids):
+            matches.append((book, gid))
+    print(
+        f"  {len(matches)} (book, game-system) pair(s) match the requested system(s).",
+        file=sys.stderr,
+    )
 
     rows: list[dict] = []
     failures: list[tuple[str, str]] = []

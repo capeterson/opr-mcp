@@ -96,7 +96,7 @@ These are the failure modes that bit during initial reverse-engineering. Don't r
 
 - **Direct CDN PDF links are not durable.** The `{renderId}` segment rotates whenever a book gets regenerated, so a link that works today may 404 next week. The `/api/army-books/{uid}/pdf?gameSystem=X` endpoint is the durable thing — call it on demand. If the user wants stable links, store the `uid` + `gameSystem`, not the resolved CDN URL.
 
-- **Books appear in multiple game systems.** Most AoF books have `enabledGameSystems: [4, 5, 6, 7, 8]` (AoF + all its skirmish/quest variants). The same `uid` resolves to different PDFs depending on which `gameSystem` you pass. The script picks the first matching game system in the user's `--game` order, which is usually what they want; flag this if the user seems to expect one-PDF-per-book and is getting confused.
+- **Books appear in multiple game systems.** Most AoF books have `enabledGameSystems: [4, 5, 6, 7, 8]` (AoF + all its skirmish/quest variants). The same `uid` resolves to a *different* PDF depending on which `gameSystem` you pass, so the script emits one row per `(book, requested game system)` pair — `--game aof,aofs` against a book enabled for both yields two rows with two distinct PDFs. If the user expected one-PDF-per-book, narrow `--game` to a single system.
 
 - **Be polite to the API.** Use modest concurrency (the script defaults to 8 workers) and don't hammer it. If a user wants the entire community catalog (thousands of books), warn them it will take a few minutes.
 

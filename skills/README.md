@@ -33,6 +33,7 @@ Symlinks need admin rights, but junctions (for directories) and hard links (for
 files) don't:
 
 ```cmd
+if not exist ".claude\skills" mkdir ".claude\skills"
 for /d %d in (skills\*) do (
   mklink /J ".claude\skills\%~nxd" "%~fd"
   mklink /H "%d\SKILL.md" "%d\AGENTS.md"
