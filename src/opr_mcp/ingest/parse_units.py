@@ -53,12 +53,13 @@ _EQUIP_TOKEN_RE = re.compile(
 # "Tough".
 _WEAPON_ATTACKS_RE = re.compile(r"\bA\d+x?\b")
 # A parametric-rule body is the *only* thing routed to rules: a bare number,
-# a placeholder (``X`` / ``N``), or an inch value (``Scout(6")``). Anything
-# else — a single rule-name word like ``Stealth`` / ``Fast``, a multi-word
-# capitalized phrase like ``Shield Wall``, or a nested-paren body like
-# ``Fear(1)`` — is treated as a named gear item that confers a rule, e.g.
-# ``Cloak (Stealth)`` / ``Banner (Fear(1))`` / ``Combat Shield (Shield Wall)``.
-_PARAMETRIC_RULE_BODY_RE = re.compile(r'^(?:\d+"?|[XN])$')
+# a placeholder (``X`` / ``N``), an inch value (``Scout(6")``), or a save-roll
+# style value with ``+`` (``Regeneration(5+)``). Anything else — a single
+# rule-name word like ``Stealth`` / ``Fast``, a multi-word capitalized phrase
+# like ``Shield Wall``, or a nested-paren body like ``Fear(1)`` — is treated
+# as a named gear item that confers a rule, e.g. ``Cloak (Stealth)`` /
+# ``Banner (Fear(1))`` / ``Combat Shield (Shield Wall)``.
+_PARAMETRIC_RULE_BODY_RE = re.compile(r'^(?:\d+\+?|\d+"|[XN])$')
 # Stat-table column-header words that may appear on a unit card just above
 # the weapon table. When a whole line consists only of these tokens, it is
 # a header — not a rule — and must be skipped.
@@ -85,11 +86,27 @@ _PROFILE_BOUNDARY_HEADINGS = frozenset({
 # skipped, but the scan continues — terminating on them would drop the unit's
 # real equipment/rules. ``spells`` is intentionally excluded: OPR units don't
 # carry a spells column on their card, so a ``Spells`` heading is always a
-# trailing section.
+# trailing section. Note: when one of these appears in ALL-CAPS form (e.g.
+# ``SPECIAL RULES``) it is treated as a hard boundary instead — see
+# :func:`_is_profile_boundary`.
 _INPROFILE_HEADINGS = frozenset({
     "equipment", "weapons", "special rules", "rules",
     "abilities", "characters", "items", "psychic", "special",
     "wargear", "armory", "armoury", "loadout",
+    "melee", "ranged", "melee weapons", "ranged weapons",
+})
+# Common OPR rule names. Used to disambiguate textual-param paren lists:
+# ``Horse (Fast), Cloak (Stealth)`` is a list of rule-granting gear (every
+# body matches a known rule), while ``Aura(Friendly), Beacon(Allies)`` is a
+# list of custom textual-param rules (no body matches).
+_COMMON_RULE_NAMES = frozenset({
+    "fast", "slow", "stealth", "fear", "fearless", "fearsome",
+    "scout", "hidden", "regeneration", "regen", "tough", "hero",
+    "furious", "ambush", "aircraft", "strider", "transport",
+    "counter", "lance", "limited", "poison", "rending", "sniper",
+    "indirect", "impact", "immobile", "blast", "reliable",
+    "ap", "deadly", "shaken", "wounds", "psychic", "caster",
+    "flying", "flier",
 })
 # Rule token: ``Furious``, ``Tough(3)``, ``AP(2)``, ``Bestial Boost``, also
 # the count-prefixed form OPR uses for per-model rules like ``10x Furious``.
@@ -109,16 +126,28 @@ def _is_profile_boundary(line: str) -> bool:
     """True if ``line`` is a heading that ends the unit's profile scan.
 
     Multi-word headings also match by prefix so a glued line like
-    ``ARMY-WIDE SPECIAL RULE Repel Ambushers: ...`` still terminates —
-    PDF extraction sometimes joins the heading and the first rule onto a
-    single line.
+    ``ARMY-WIDE SPECIAL RULE Repel Ambushers: ...`` (or with a colon
+    after the heading) still terminates — PDF extraction sometimes
+    joins the heading and the first rule onto a single line.
+
+    An in-profile label like ``Special Rules`` printed in ALL CAPS
+    (``SPECIAL RULES``) is treated as a hard boundary too: the all-caps
+    form is the typical glossary banner, not a unit-card column header.
     """
     norm = _normalize_heading(line)
     if norm in _PROFILE_BOUNDARY_HEADINGS:
         return True
-    return any(
-        " " in h and norm.startswith(h + " ")
+    if any(
+        " " in h and (norm.startswith(h + " ") or norm.startswith(h + ":"))
         for h in _PROFILE_BOUNDARY_HEADINGS
+    ):
+        return True
+    stripped = line.strip().rstrip(":")
+    return bool(
+        stripped
+        and stripped.upper() == stripped
+        and any(c.isalpha() for c in stripped)
+        and norm in _INPROFILE_HEADINGS
     )
 
 
@@ -192,90 +221,139 @@ def _is_table_header_line(line: str) -> bool:
     return True
 
 
+def _split_top_level_commas(s: str) -> list[str]:
+    """Split ``s`` on top-level commas, ignoring commas inside parens.
+
+    OPR weapons commonly have commas inside their stat block
+    (``Rifle (24", A1, AP(1))``) — a naive split would chop them up.
+    """
+    out: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in s:
+        if ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            out.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    tail = "".join(cur).strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
 def _parse_paren_line(line: str) -> tuple[list[dict], list[str]] | None:
-    """Parse a comma-separated list of ``Name(body)`` tokens.
+    """Parse a comma-separated stat-block line.
 
-    Returns ``(equipment_items, rule_tokens)`` if the line is a clean list of
-    parenthesized items, or ``None`` if the line contains anything else
-    (prose, stat headers, ...). Items are split by body shape via
-    :func:`_classify_paren_body` so that ``CCW (A2), Tough(3)`` yields
-    ``([CCW], ['Tough(3)'])`` — a weapon stays in equipment while a sibling
-    parametric rule routes to rules. Custom rules with a textual parameter
-    like ``Aura(Friendly)`` likewise route to rules instead of being eaten
-    as gear.
+    Returns ``(equipment_items, rule_tokens)`` if every comma-separated
+    segment is either a recognizable ``Name(body)`` token or a bare rule
+    token. Returns ``None`` if any segment is something else (prose, stat
+    line, garbage). Mixing is allowed, so a collapsed line like
+    ``Rifle (24", A1), CCW (A1), Hero`` keeps the weapons AND the bare
+    ``Hero`` rule — the previous all-or-nothing match dropped them.
 
-    Items must be comma-separated. ``CCW (A2) Tough(3)`` (no comma)
-    therefore returns ``None`` rather than silently treating the rule as a
-    second weapon.
+    Per-segment classification:
+
+    - ``Name(body)`` with weapon attacks → weapon (equipment).
+    - ``Name(body)`` with a parametric rule body (number, X/N, inch,
+      ``5+``) → rule token.
+    - Other ``Name(body)`` → equipment by default (gear with descriptor),
+      but the whole line is reclassified as rules if every item has a
+      textual-only body AND none of those bodies are recognized OPR
+      rule names (so ``Aura(Friendly), Beacon(Allies)`` becomes rules
+      while ``Horse (Fast), Cloak (Stealth)`` stays equipment).
+    - Bare token without parens → rule token if it passes
+      :data:`_RULE_TOKEN_RE` and :func:`_looks_like_rule_name`.
     """
     s = line.strip()
     if not s:
         return None
-    m = _EQUIP_TOKEN_RE.match(s)
-    if not m:
+    segments = _split_top_level_commas(s)
+    if not segments:
         return None
-    raw_items: list[tuple[str, str]] = [
-        (m.group("name").strip(), m.group("body").strip())
-    ]
-    pos = m.end()
-    while pos < len(s):
-        while pos < len(s) and s[pos] == " ":
-            pos += 1
-        if pos >= len(s):
-            break
-        if s[pos] != ",":
-            return None
-        pos += 1
-        while pos < len(s) and s[pos] == " ":
-            pos += 1
-        if pos >= len(s):
-            return None
-        m = _EQUIP_TOKEN_RE.match(s, pos)
-        if not m:
-            return None
-        raw_items.append((m.group("name").strip(), m.group("body").strip()))
-        pos = m.end()
+
+    raw_paren_items: list[tuple[str, str]] = []
+    bare_rules: list[str] = []
+    for seg in segments:
+        m = _EQUIP_TOKEN_RE.fullmatch(seg)
+        if m:
+            raw_paren_items.append(
+                (m.group("name").strip(), m.group("body").strip())
+            )
+            continue
+        bare = _RULE_COUNT_PREFIX_RE.sub("", seg)
+        if _RULE_TOKEN_RE.match(bare) and _looks_like_rule_name(bare):
+            bare_rules.append(bare)
+            continue
+        return None
+
+    if not raw_paren_items and not bare_rules:
+        return None
+    # A single bare token alone (no paren items) is likely flavor — a
+    # standalone ``Veteran Warriors`` line passes _RULE_TOKEN_RE but
+    # shouldn't be a rule. Require either >=1 paren item or >=2 bare
+    # tokens to commit to a stat-block line; the post-stats bare-rule
+    # scanner still picks up lone ``Hero``-style lines once
+    # ``in_stat_block`` is established.
+    if not raw_paren_items and len(bare_rules) < 2:
+        return None
 
     equipment: list[dict] = []
-    rule_tokens: list[str] = []
-    for name, body in raw_items:
+    rule_tokens: list[str] = list(bare_rules)
+    for name, body in raw_paren_items:
         kind = _classify_paren_item(name, body)
         if kind == "rule":
             rule_tokens.append(f"{name}({body})")
         else:
             equipment.append({"name": name, "details": body})
-    # Reclassification for textual-param rule lists. A standalone
-    # ``Cloak (Stealth)`` is gear (kept as equipment by the per-item
-    # classifier), but a line composed entirely of ``Aura(Friendly),
-    # Beacon(Allies)``-style tokens (>=2 items, no weapon, every item a
-    # single-word name with a single alphabetic-word body) reads as a
-    # rules list, not a list of gear items.
-    if (
-        len(raw_items) >= 2
-        and not any(_WEAPON_ATTACKS_RE.search(b) for _, b in raw_items)
+
+    # Reclassification for custom textual-param rule lists. A line with
+    # >=2 paren items where every item is a single-word name + single
+    # alphabetic-word body AND none of those bodies match a recognized
+    # OPR rule name reads as custom rules, not gear. ``Aura(Friendly),
+    # Beacon(Allies)`` reclassifies; ``Horse (Fast), Cloak (Stealth)``
+    # does NOT (``Fast`` / ``Stealth`` are real rules, so the parens
+    # tokens are rule-granting gear). Bare-rule siblings on the same
+    # line are preserved separately.
+    is_textual_param = (
+        len(raw_paren_items) >= 2
+        and not any(_WEAPON_ATTACKS_RE.search(b) for _, b in raw_paren_items)
         and all(
             " " not in n.strip()
             and "(" not in b
             and re.fullmatch(r"[A-Za-z]+", b.strip()) is not None
-            for n, b in raw_items
+            for n, b in raw_paren_items
         )
-    ):
-        return [], [f"{n}({b})" for n, b in raw_items]
+        and not any(
+            b.strip().lower() in _COMMON_RULE_NAMES
+            for _, b in raw_paren_items
+        )
+    )
+    if is_textual_param:
+        equipment = []
+        rule_tokens = list(bare_rules) + [
+            f"{n}({b})" for n, b in raw_paren_items
+        ]
     return equipment, rule_tokens
 
 
 def _line_anchors_stat_block(line: str) -> bool:
     """True if ``line`` is a definitive unit-profile signal (a weapon line,
-    a parametric-rule line, or a multi-token bare-rule line)."""
+    a parametric-rule line, a multi-token bare-rule line, or any clean
+    list of paren items / bare rules)."""
     s = line.strip()
     if not s:
         return False
     parsed = _parse_paren_line(s)
     if parsed is not None:
         eq, rules = parsed
-        if any(_WEAPON_ATTACKS_RE.search(it["details"]) for it in eq):
-            return True
-        if rules:  # parametric rule(s)
+        if eq or rules:
             return True
     if s.startswith("Rules:") or s.startswith("Special:"):
         return True

@@ -560,6 +560,123 @@ def test_parse_unit_keeps_pre_stats_rules_prefix():
     assert "Furious" in rule_set
 
 
+def test_parse_unit_salvages_weapons_with_bare_rule_sibling():
+    """``Rifle (24", A1), CCW (A1), Hero`` keeps ALL weapons + the rule."""
+    s = _section(
+        "Trooper [5] - 90pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1), CCW (A1), Hero\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Rifle", "CCW"}.issubset(eq_names), eq_names
+    assert "Hero" in u.rules
+
+
+def test_parse_unit_rule_granting_gear_list_kept_as_equipment():
+    """``Horse (Fast), Cloak (Stealth)`` stays equipment (Fast/Stealth are rules)."""
+    s = _section(
+        "Knight [1] - 110pts\n"
+        "Quality 3+   Defense 4+\n"
+        "Sword (A2)\n"
+        "Horse (Fast), Cloak (Stealth)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Horse", "Cloak"}.issubset(eq_names), eq_names
+
+
+def test_parse_unit_plus_valued_rule_param():
+    """``Regeneration(5+)`` is a parametric rule, not equipment."""
+    s = _section(
+        "Wraith [1] - 80pts\n"
+        "Quality 3+   Defense 5+\n"
+        "Claws (A2)\n"
+        "Regeneration(5+)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Regeneration(5+)" in rule_set, u.rules
+    assert "Regeneration" not in {e["name"] for e in u.equipment}
+
+
+def test_parse_unit_inline_boundary_with_colon():
+    """``ARMY-WIDE SPECIAL RULE: Repel ...`` with colon terminates."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "ARMY-WIDE SPECIAL RULE: Repel Ambushers gain Counter\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    assert all("repel" not in r for r in rule_set)
+
+
+def test_parse_unit_all_caps_special_rules_terminates():
+    """An ALL-CAPS ``SPECIAL RULES`` glossary heading terminates the scan."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3)\n"
+        "SPECIAL RULES\n"
+        "Furious\n"
+        "Deadly\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    assert "furious" not in rule_set
+    assert "deadly" not in rule_set
+
+
+def test_parse_unit_pre_stats_bare_rule_line_preserved():
+    """``Furious, Hero`` BEFORE Q/D is preserved (Codex L515)."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Furious, Hero\n"
+        "Quality 4+   Defense 5+\n"
+        "Rifle (24\", A1)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Furious" in rule_set
+    assert "Hero" in rule_set
+
+
+def test_parse_unit_skips_melee_ranged_table_label():
+    """``Melee`` / ``Ranged`` weapon-section labels are skipped, not rules."""
+    s = _section(
+        "Trooper [5] - 90pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Ranged\n"
+        "Rifle (24\", A1)\n"
+        "Melee Weapons\n"
+        "CCW (A1)\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    assert "melee" not in rule_set
+    assert "ranged" not in rule_set
+    assert "melee weapons" not in rule_set
+
+
 def test_parse_unit_strips_count_prefix_on_rule_tokens():
     """Per-model count prefix on rules ('10x Furious') must be tolerated."""
     s = _section(
