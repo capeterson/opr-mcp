@@ -399,6 +399,79 @@ def test_parse_unit_trailing_spells_section_is_a_boundary():
     assert "Ice Bolt" not in rule_set
 
 
+def test_parse_unit_single_word_gear_with_rule_descriptor():
+    """``Cloak (Stealth)`` and ``Horse (Fast)`` stay in equipment, not rules."""
+    s = _section(
+        "Scout [1] - 70pts\n"
+        "Quality 4+   Defense 4+\n"
+        "Cloak (Stealth)\n"
+        "Horse (Fast)\n"
+        "CCW (A1)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Cloak", "Horse", "CCW"}.issubset(eq_names), eq_names
+    rule_set = set(u.rules)
+    # And these must NOT show up in rules.
+    assert "Cloak(Stealth)" not in rule_set
+    assert "Horse(Fast)" not in rule_set
+
+
+def test_parse_unit_inch_valued_rule_param():
+    """``Scout(6")`` is a rule, not a weapon."""
+    s = _section(
+        "Sniper [1] - 95pts\n"
+        "Quality 3+   Defense 5+\n"
+        "Long Rifle (30\", A1, AP(2))\n"
+        "Scout(6\"), Strider\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    assert "Scout(6\")" in rule_set, u.rules
+    assert "Strider" in rule_set, u.rules
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Scout" not in eq_names
+
+
+def test_parse_unit_keeps_pre_stats_equipment_lines():
+    """A clean weapon line that appears before the Q/D stat line is preserved."""
+    s = _section(
+        "Trooper [5] - 80pts\n"
+        "Rifle (24\", A1)\n"
+        "Quality 4+   Defense 5+\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Rifle" in eq_names, eq_names
+
+
+def test_parse_unit_skips_stat_table_header():
+    """``Weapon Range Attacks AP Special`` column header must not become a rule."""
+    s = _section(
+        "Squad [5] - 100pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Weapon Range Attacks AP Special\n"
+        "Rifle (24\", A1)\n"
+        "Tough(3), Furious\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = {r.lower() for r in u.rules}
+    assert "weapon" not in rule_set
+    assert "range" not in rule_set
+    assert "weapon range attacks ap special" not in rule_set
+    assert "Tough(3)" in u.rules
+    assert "Furious" in u.rules
+
+
 def test_parse_unit_strips_count_prefix_on_rule_tokens():
     """Per-model count prefix on rules ('10x Furious') must be tolerated."""
     s = _section(
