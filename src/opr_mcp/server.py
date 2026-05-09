@@ -8,6 +8,7 @@ transports:
 """
 from __future__ import annotations
 
+import importlib.resources as resources
 import logging
 from typing import Any
 
@@ -20,6 +21,7 @@ from .config import (
     configure_logging,
     http_host,
     http_port,
+    instructions_file,
     load_auth_config,
 )
 from .tools import get_special_rule as get_special_rule_tool
@@ -33,12 +35,38 @@ mcp: FastMCP
 _conn = None
 _auth_provider = None
 
+_DEFAULT_INSTRUCTIONS_RESOURCE = "instructions.md"
+_cached_instructions: str | None = None
+
 
 def _db():
     global _conn
     if _conn is None:
         _conn = db.open_db()
     return _conn
+
+
+def _load_instructions() -> str:
+    """Return the server-level instructions string advertised to MCP clients.
+
+    Reads the bundled ``instructions.md`` by default. If ``INSTRUCTIONS_FILE``
+    is set, reads that path instead — letting server owners override the
+    guidance without modifying the package.
+    """
+    global _cached_instructions
+    if _cached_instructions is not None:
+        return _cached_instructions
+    override = instructions_file()
+    if override is not None:
+        text = override.read_text(encoding="utf-8")
+    else:
+        text = (
+            resources.files("opr_mcp")
+            .joinpath(_DEFAULT_INSTRUCTIONS_RESOURCE)
+            .read_text(encoding="utf-8")
+        )
+    _cached_instructions = text
+    return text
 
 
 def _with_status(payload):
@@ -68,7 +96,12 @@ def _with_status(payload):
 
 def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     if with_auth is None:
-        return FastMCP("opr", host=http_host(), port=http_port())
+        return FastMCP(
+            "opr",
+            instructions=_load_instructions(),
+            host=http_host(),
+            port=http_port(),
+        )
 
     from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
     from pydantic import AnyHttpUrl
@@ -100,6 +133,7 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     )
     return FastMCP(
         "opr",
+        instructions=_load_instructions(),
         auth_server_provider=_auth_provider,
         auth=auth_settings,
         host=http_host(),
