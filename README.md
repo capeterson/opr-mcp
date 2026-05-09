@@ -140,6 +140,15 @@ wrapped with an ``indexing`` block:
 When indexing is idle and complete, tools return their bare result the same
 way they always have.
 
+The server also advertises a block of usage instructions to clients during
+the MCP `initialize` handshake (the bundled
+[`src/opr_mcp/instructions.md`](src/opr_mcp/instructions.md)). The default
+text tells clients to look up force-organization rules via `search_rules`
+before building or validating an army list, and to treat compliance as a
+hard requirement unless the user has opted out (e.g. for narrative play).
+Override the text by editing the bundled file or by setting
+`INSTRUCTIONS_FILE`.
+
 ## Configuration
 
 Environment variables (all optional):
@@ -155,6 +164,12 @@ Environment variables (all optional):
   server runs; the index is updated automatically when PDFs are added,
   changed, or removed. The directory is created if it does not exist.
   Default: `/pdf`.
+- `INSTRUCTIONS_FILE` — path to a markdown file whose contents are
+  advertised to MCP clients as the server's instructions (read once per
+  process). When unset, the bundled `src/opr_mcp/instructions.md` is
+  used. Point this at your own copy to customise the guidance clients
+  see (e.g. relaxing the force-org-compliance default for narrative-play
+  deployments).
 - Army Forge auto-fetch: see the
   [Auto-fetch from Army Forge](#auto-fetch-from-army-forge) section above for
   `FORGE_*` variables.

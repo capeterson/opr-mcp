@@ -28,6 +28,13 @@ def embed_model_name() -> str:
     return os.environ.get("EMBED_MODEL", DEFAULT_EMBED_MODEL)
 
 
+def instructions_file() -> Path | None:
+    raw = os.environ.get("INSTRUCTIONS_FILE")
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
 def configure_logging() -> None:
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
