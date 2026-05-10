@@ -226,10 +226,17 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
             f"Database path {p} is a directory, not a file. "
             "Set DB to a file path (e.g. /data/db/opr.db, not /data/db)."
         )
-    conn = sqlite3.connect(str(p))
+    # Bump the busy timeout above sqlite3's default 5s. The startup ingest
+    # thread holds a single write transaction across many INSERTs (chunks +
+    # embeddings + units + rules) and embedding inference can stretch that
+    # well past 5s, so any concurrent writer (the MCP server's own schema
+    # init, the file-watcher, the forge scheduler) needs more headroom to
+    # avoid bailing out with "database is locked".
+    conn = sqlite3.connect(str(p), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     _load_sqlite_vec(conn)
     return conn
 
