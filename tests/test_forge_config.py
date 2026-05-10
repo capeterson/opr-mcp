@@ -48,8 +48,32 @@ def test_filters_invalid_raises(monkeypatch):
         fcfg.filters()
 
 
-def test_games_default_is_none(monkeypatch):
+def test_games_default_is_gf_and_aof(monkeypatch):
+    """Unset / empty FORGE_GAMES resolves to GF + AOF, not the full
+    catalog. Most users play one of those two flagship systems and
+    would rather not pull every Quest/Skirmish/AI variant by default."""
     monkeypatch.delenv("FORGE_GAMES", raising=False)
+    # gf=2, aof=4 per :data:`forge.api.GAME_SYSTEMS`.
+    assert fcfg.games() == [2, 4]
+
+
+def test_games_default_when_set_blank(monkeypatch):
+    """Whitespace-only is the same as unset."""
+    monkeypatch.setenv("FORGE_GAMES", "   ")
+    assert fcfg.games() == [2, 4]
+
+
+def test_games_all_sentinel_returns_none(monkeypatch):
+    """``FORGE_GAMES=all`` is the explicit opt-in to the legacy
+    "no scope filter" behaviour — :mod:`cleanup` interprets
+    ``allowed_game_systems=None`` as "version-cap only, no
+    system pruning"."""
+    monkeypatch.setenv("FORGE_GAMES", "all")
+    assert fcfg.games() is None
+
+
+def test_games_all_sentinel_is_case_insensitive(monkeypatch):
+    monkeypatch.setenv("FORGE_GAMES", "ALL")
     assert fcfg.games() is None
 
 

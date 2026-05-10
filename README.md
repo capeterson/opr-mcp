@@ -84,9 +84,16 @@ the local `forge_books` table; only differing ones get downloaded.
   (comma-separated). Default: `official`. The community catalog is large
   (thousands of books); enable it deliberately.
 - `FORGE_GAMES` — comma-separated game-system slugs or numeric IDs
-  to scan. Default: every known system (`ftl,gf,gff,aof,aofs,aofr,aofq,aofqai,gfsq,gfsqai`).
-  A book contributes one PDF per game-system in its `enabledGameSystems`
-  intersected with this list.
+  to scan. Default: `gf,aof` (the two flagship systems). Set to `all`
+  to opt back into every known system
+  (`ftl,gf,gff,aof,aofs,aofr,aofq,aofqai,gfsq,gfsqai`), or list slugs
+  explicitly for a custom subset. A book contributes one PDF per
+  game-system in its `enabledGameSystems` intersected with this list.
+  Note: the cleanup sweeper also honors this value — if you upgrade
+  from a release that defaulted to "all", running cleanup will prune
+  any locally-mirrored books for systems no longer in scope. Set
+  `FORGE_GAMES=all` (or pass `--all-systems` to `opr-mcp cleanup`)
+  to keep them.
 - `FORGE_PDF_DIR` — explicit destination. Default precedence:
   `<PDF_DIR>/forge` if `PDF_DIR` is set, otherwise a `forge-pdfs` folder
   under the platform user data dir.

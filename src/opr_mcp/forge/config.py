@@ -12,6 +12,16 @@ from .api import GAME_SYSTEMS, SLUG_TO_ID
 DEFAULT_INTERVAL_SECONDS = 12 * 60 * 60  # 12 hours
 MIN_INTERVAL_SECONDS = 60
 
+# Default scope for FORGE_GAMES when the env var is unset. The full
+# OPR catalog spans ten game systems (FTL, GF, GFF, AOF, the four
+# AOFS/AOFR/AOFQ/AOFQAI variants, and the two GFSQ/GFSQAI Quest
+# variants), but most users only play one or two of them and would
+# rather not download or store hundreds of unrelated PDFs. Defaulting
+# to GF + AOF covers the two flagship systems; users who want more
+# can list slugs explicitly, and users who want all known systems
+# can set ``FORGE_GAMES=all``.
+DEFAULT_GAMES: tuple[str, ...] = ("gf", "aof")
+
 
 def interval_seconds() -> int:
     """Read ``FORGE_INTERVAL_SECONDS`` (default: 12 hours)."""
@@ -48,10 +58,35 @@ def filters() -> list[str]:
     return out or ["official"]
 
 
+def _default_games() -> list[int]:
+    """Resolve :data:`DEFAULT_GAMES` to game-system IDs."""
+    return [SLUG_TO_ID[s] for s in DEFAULT_GAMES]
+
+
 def games() -> list[int] | None:
-    """Read ``FORGE_GAMES`` (default: ``None`` ≡ all known systems)."""
+    """Read ``FORGE_GAMES``.
+
+    Returns:
+        * the resolved list of game-system IDs when ``FORGE_GAMES`` is
+          set to a non-empty list of slugs / numeric IDs;
+        * the default :data:`DEFAULT_GAMES` IDs when ``FORGE_GAMES``
+          is unset or whitespace-only;
+        * ``None`` when ``FORGE_GAMES=all`` — the legacy
+          "no scope filter" sentinel preserved for callers that
+          historically relied on it (notably :mod:`cleanup`, which
+          treats ``allowed_game_systems=None`` as "version-cap only,
+          no system pruning").
+
+    Returning a non-empty list rather than ``None`` by default means
+    ``forge-scan`` and the background sync only pull GF + AOF books
+    out of the box, and ``cleanup`` will prune content from any other
+    system the user hasn't explicitly opted into. To keep the prior
+    behaviour, set ``FORGE_GAMES=all`` or list the slugs explicitly.
+    """
     raw = os.environ.get("FORGE_GAMES", "").strip()
     if not raw:
+        return _default_games()
+    if raw.lower() == "all":
         return None
     out: list[int] = []
     for tok in (t.strip().lower() for t in raw.split(",")):
@@ -72,9 +107,9 @@ def games() -> list[int] | None:
         else:
             raise RuntimeError(
                 f"FORGE_GAMES has unknown slug {tok!r} "
-                f"(known: {', '.join(sorted(SLUG_TO_ID))})"
+                f"(known: {', '.join(sorted(SLUG_TO_ID))} or 'all')"
             )
-    return out or None
+    return out or _default_games()
 
 
 def pdf_dir(serve_pdf_dir: Path | None = None) -> Path:
