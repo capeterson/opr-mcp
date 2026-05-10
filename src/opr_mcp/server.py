@@ -185,6 +185,10 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         Use this when the user names a specific unit and wants its profile. Returns
         multiple rows when the same name appears in multiple armies.
 
+        Each result includes a ``has_upgrades`` boolean indicating whether the
+        unit has any structured upgrade options in the index. When true, call
+        ``lookup_upgrades`` for the option list and point costs.
+
         Args:
             name: Unit name (or substring). Case-insensitive.
             army: Optional army filter to disambiguate.

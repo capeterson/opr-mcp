@@ -30,7 +30,9 @@ def run(
     placeholders = ",".join("?" * len(doc_ids))
     sql = f"""
         SELECT u.id, u.army, u.name, u.qty, u.quality, u.defense, u.base_points,
-               u.equipment_json, u.rules_json, d.filename, d.version, c.page
+               u.equipment_json, u.rules_json, d.filename, d.version, c.page,
+               EXISTS (SELECT 1 FROM unit_upgrades up WHERE up.unit_id = u.id)
+                   AS has_upgrades
         FROM units u
         JOIN documents d ON d.id = u.document_id
         LEFT JOIN chunks c ON c.id = u.chunk_id
@@ -76,6 +78,7 @@ def run(
                 "base_points": r["base_points"],
                 "equipment": equipment,
                 "rules": rules,
+                "has_upgrades": bool(r["has_upgrades"]),
                 "source": {
                     "filename": r["filename"],
                     "page": r["page"],

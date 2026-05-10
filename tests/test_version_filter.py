@@ -117,3 +117,25 @@ def test_pdf_banner_captures_version():
     m = _BANNER_RE.search("AOF - BEASTMEN V3.5.3")
     assert m is not None
     assert m.group("version") == "3.5.3"
+
+
+def test_lookup_unit_reports_has_upgrades(tmp_db):
+    conn = db.open_db(tmp_db)
+    doc = _seed_doc(conn, path="/a/a.pdf", sha="h1",
+                    game_system="aof", army="Beastmen", version="1.0")
+    _seed_unit(conn, doc, name="WithUpgrades", army="Beastmen", points=50)
+    _seed_unit(conn, doc, name="NoUpgrades", army="Beastmen", points=30)
+    upgraded_id = conn.execute(
+        "SELECT id FROM units WHERE name = ?", ("WithUpgrades",),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO unit_upgrades (document_id, unit_id, group_index, "
+        "group_kind, option_index, option_text, points_cost, raw_text) "
+        "VALUES (?, ?, 0, 'Upgrade with one', 0, 'Halberd', 5, '')",
+        (doc, upgraded_id),
+    )
+    conn.commit()
+
+    by_name = {r["name"]: r for r in lookup_unit.run(conn, "Upgrades")}
+    assert by_name["WithUpgrades"]["has_upgrades"] is True
+    assert by_name["NoUpgrades"]["has_upgrades"] is False
