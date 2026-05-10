@@ -127,7 +127,6 @@ Tools exposed:
 | `list_units(army)` | Roster for one army |
 | `list_documents()` | All ingested PDFs |
 | `index_status()` | Whether ingest is currently running and whether the initial sweep has completed |
-| `read_me_first()` | Required reading before list-building or cost questions; returns force-org, hero-attachment, and tool-selection guidance |
 
 `lookup_upgrades` is the right tool for any "how much does upgrade X cost"
 question. Point costs vary across game systems (AoF / AoFR / AoFS / AoFQ have
@@ -158,24 +157,21 @@ wrapped with an ``indexing`` block:
 When indexing is idle and complete, tools return their bare result the same
 way they always have.
 
-The server publishes its usage guidance in two layers, since several MCP
-clients do not reliably surface the handshake `instructions` field to
-the model (especially when several MCP servers are loaded at once):
+The server's usage guidance lives in
+[`src/opr_mcp/instructions.md`](src/opr_mcp/instructions.md) and covers
+force-organization limits, how Hero-attached units count for
+activation/force-org purposes, point-cost conventions, and the recommended
+list-building workflow. Treat compliance as a hard requirement unless the
+user has opted out (e.g. for narrative play).
 
-1. **Handshake pointer.** A short fixed string sent during the MCP
-   `initialize` handshake telling clients to call the `read_me_first`
-   tool before answering army-building or upgrade-cost questions.
-2. **Full guidance.** The bundled
-   [`src/opr_mcp/instructions.md`](src/opr_mcp/instructions.md),
-   returned verbatim by the `read_me_first` tool. Covers
-   force-organization limits, how Hero-attached units count for
-   activation/force-org purposes, point-cost conventions, and the
-   recommended list-building workflow. Treat compliance as a hard
-   requirement unless the user has opted out (e.g. for narrative play).
+The server attaches the full guidance as an `"instructions"` sibling field
+on the response of the **first tool call in each MCP session**, and never
+again for that session. This works under clients that drop the handshake
+`instructions` field or that load tool schemas lazily — both failure modes
+where a dedicated guidance tool would never be visible to the model.
 
-Override the full guidance by editing the bundled file or by setting
-`INSTRUCTIONS_FILE`. The handshake pointer is fixed in code and not
-overridable — operators customize content, not the pointer.
+Override the guidance by editing the bundled file or by setting
+`INSTRUCTIONS_FILE`.
 
 ## Configuration
 
@@ -193,12 +189,11 @@ Environment variables (all optional):
   changed, or removed. The directory is created if it does not exist.
   Default: `/pdf`.
 - `INSTRUCTIONS_FILE` — path to a markdown file whose contents are
-  returned by the `read_me_first` tool (read once per process). When
-  unset, the bundled `src/opr_mcp/instructions.md` is used. Point this
-  at your own copy to customise the full guidance clients see (e.g.
-  relaxing the force-org-compliance default for narrative-play
-  deployments). The short handshake pointer that names `read_me_first`
-  is fixed in code and not affected by this variable.
+  auto-injected into the first tool response per MCP session (read once
+  per process). When unset, the bundled `src/opr_mcp/instructions.md` is
+  used. Point this at your own copy to customise the full guidance
+  clients see (e.g. relaxing the force-org-compliance default for
+  narrative-play deployments).
 - Army Forge auto-fetch: see the
   [Auto-fetch from Army Forge](#auto-fetch-from-army-forge) section above for
   `FORGE_*` variables.
