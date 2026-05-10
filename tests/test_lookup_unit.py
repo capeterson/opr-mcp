@@ -356,6 +356,79 @@ def test_include_rule_text_unknown_rule_gets_none_description(tmp_db):
     ]
 
 
+def test_include_rule_text_finds_definitions_in_core_rulebook(tmp_db):
+    """The unit's army book often references ``Tough(3)`` / ``AP(1)``
+    without duplicating the core glossary entry — the definition lives
+    in a separate core rulebook document. Enrichment must search the
+    broader doc set (everything ``filtered_document_ids`` returns for
+    the game system, including ``army IS NULL`` cores), not just the
+    matched unit's own document. Regression for Codex P2 review on
+    tools/__init__.py:212."""
+    conn = db.open_db(tmp_db)
+    army_doc = _seed_doc(conn, path="/a/vd.pdf", sha="h1",
+                         game_system="aof", army="Volcanic Dwarves",
+                         version="3.5.3")
+    core_doc = conn.execute(
+        "INSERT INTO documents (path, filename, sha256, game_system, title, "
+        "army, version, page_count, ingested_at) "
+        "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?) RETURNING id",
+        ("/a/aof-core.pdf", "aof-core.pdf", "h2", "aof",
+         "AOF Core Rules", "3.5.3", 1, "2026-01-01"),
+    ).fetchone()[0]
+    _seed_unit(conn, army_doc, name="Volcanic Leader",
+               army="Volcanic Dwarves", points=35,
+               rules_json='["Tough(3)"]')
+    _seed_rule(conn, core_doc, name="Tough",
+               description="Takes X wounds before being removed.",
+               scope="core", parametric=1)
+    conn.commit()
+
+    [hit] = lookup_unit.run(
+        conn, "Volcanic Leader", army="Volcanic Dwarves",
+        include_rule_text=True,
+    )
+    assert hit["rules"] == [
+        {"name": "Tough(3)",
+         "description": "Takes X wounds before being removed."},
+    ]
+
+
+def test_include_rule_text_does_not_leak_army_specific_rule_across_armies(
+    tmp_db,
+):
+    """When two armies appear in the result set and both define the
+    same rule name in their own books (army-scoped), each unit must
+    receive its own army's definition — not whichever document landed
+    first in the rule map. Regression for Codex P2 review on
+    tools/__init__.py:150."""
+    conn = db.open_db(tmp_db)
+    vd = _seed_doc(conn, path="/a/vd.pdf", sha="h1",
+                   game_system="aof", army="Volcanic Dwarves", version="3.5.3")
+    bm = _seed_doc(conn, path="/a/bm.pdf", sha="h2",
+                   game_system="aof", army="Beastmen", version="3.5.3")
+    _seed_unit(conn, vd, name="Champion", army="Volcanic Dwarves", points=50,
+               rules_json='["Bloodlust"]')
+    _seed_unit(conn, bm, name="Champion", army="Beastmen", points=60,
+               rules_json='["Bloodlust"]')
+    _seed_rule(conn, vd, name="Bloodlust",
+               description="Volcanic Dwarves Bloodlust text.",
+               scope="army:Volcanic Dwarves")
+    _seed_rule(conn, bm, name="Bloodlust",
+               description="Beastmen Bloodlust text.",
+               scope="army:Beastmen")
+    conn.commit()
+
+    rows = lookup_unit.run(conn, "Champion", include_rule_text=True)
+    by_army = {r["army"]: r for r in rows}
+    assert by_army["Volcanic Dwarves"]["rules"] == [
+        {"name": "Bloodlust",
+         "description": "Volcanic Dwarves Bloodlust text."},
+    ]
+    assert by_army["Beastmen"]["rules"] == [
+        {"name": "Bloodlust", "description": "Beastmen Bloodlust text."},
+    ]
+
+
 def test_upgrade_fetch_is_bulk_not_per_unit(tmp_db):
     """Regression: the merged ``lookup_unit`` must run the
     ``unit_upgrades`` JOIN once for all matched units, not once per

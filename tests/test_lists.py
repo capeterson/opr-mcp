@@ -158,6 +158,71 @@ def test_list_units_details_bulk_fetches_upgrades_in_one_query(tmp_db):
     )
 
 
+def test_list_units_game_system_filter_narrows_multi_system_army(tmp_db):
+    """An army present in multiple game systems (e.g. AoF and AoF
+    Skirmish) returns BOTH systems' units when ``game_system`` is
+    omitted, but only the filtered system's units when passed. Without
+    this, ``details=True`` rosters would mix point scales for the same
+    unit name. Regression for Codex P2 review on lists.py:29."""
+    conn = db.open_db(tmp_db)
+    aof = _seed_doc(conn, path="/a/aof.pdf", sha="h1",
+                    game_system="aof", army="Volcanic Dwarves", version="3.5.3")
+    aofs = _seed_doc(conn, path="/a/aofs.pdf", sha="h2",
+                     game_system="skirmish", army="Volcanic Dwarves",
+                     version="3.5.3")
+    _seed_unit(conn, aof, name="Volcanic Leader",
+               army="Volcanic Dwarves", points=35)
+    _seed_unit(conn, aofs, name="Volcanic Leader",
+               army="Volcanic Dwarves", points=12)
+    conn.commit()
+
+    # Without game_system: both systems' point scales are returned.
+    all_rows = lists.list_units(
+        conn, "Volcanic Dwarves", details=True,
+    )
+    points_by_system = {r["source"]["game_system"]: r["base_points"]
+                        for r in all_rows}
+    assert points_by_system == {"aof": 35, "skirmish": 12}
+
+    # With game_system="aof": only AoF point scale.
+    aof_only = lists.list_units(
+        conn, "Volcanic Dwarves", game_system="aof", details=True,
+    )
+    assert [r["source"]["game_system"] for r in aof_only] == ["aof"]
+    assert aof_only[0]["base_points"] == 35
+
+
+def test_list_units_details_finds_core_rule_definitions(tmp_db):
+    """``list_units(details=True, include_rule_text=True)`` must reach
+    the core/glossary book the same way ``lookup_unit`` does, so common
+    rules referenced in army books resolve to their core definitions
+    instead of ``None``."""
+    conn = db.open_db(tmp_db)
+    army_doc = _seed_doc(conn, path="/a/bm.pdf", sha="h1",
+                         game_system="aof", army="Beastmen", version="1.0")
+    core_doc = conn.execute(
+        "INSERT INTO documents (path, filename, sha256, game_system, title, "
+        "army, version, page_count, ingested_at) "
+        "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?) RETURNING id",
+        ("/a/aof-core.pdf", "aof-core.pdf", "h2", "aof",
+         "AOF Core Rules", "1.0", 1, "2026-01-01"),
+    ).fetchone()[0]
+    _seed_unit(conn, army_doc, name="Berserker", army="Beastmen", points=50,
+               rules_json='["Tough(3)"]')
+    _seed_rule(conn, core_doc, name="Tough",
+               description="Takes X wounds before being removed.",
+               scope="core", parametric=1)
+    conn.commit()
+
+    [row] = lists.list_units(
+        conn, "Beastmen", details=True, include_rule_text=True,
+    )
+    assert row["rules"] == [
+        {"name": "Tough(3)",
+         "description": "Takes X wounds before being removed."},
+    ]
+
+
 def test_list_armies_counts_documents_and_units(tmp_db):
     conn = db.open_db(tmp_db)
     a = _seed_doc(conn, path="/a/aof.pdf", sha="h1",

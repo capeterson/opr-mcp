@@ -78,4 +78,18 @@ def run(
 
     rows = sorted(rows, key=score)
 
-    return enrich_unit_rows(conn, rows, include_rule_text=include_rule_text)
+    # Rule-text enrichment must reach the core/glossary book, which has
+    # ``army IS NULL`` and would be excluded from ``doc_ids`` whenever
+    # the caller passes an ``army`` filter. Drop the army filter for the
+    # rule search to keep core entries (e.g. ``Tough``, ``AP``) findable.
+    rule_doc_ids = (
+        filtered_document_ids(conn, game_system=game_system, version=version)
+        if include_rule_text
+        else None
+    )
+    return enrich_unit_rows(
+        conn,
+        rows,
+        include_rule_text=include_rule_text,
+        rule_doc_ids=rule_doc_ids,
+    )

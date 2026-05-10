@@ -329,6 +329,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
     @mcp_obj.tool()
     def list_units(
         army: str,
+        game_system: str | None = None,
         version: str | None = None,
         details: bool = False,
         include_rule_text: bool = False,
@@ -346,6 +347,10 @@ def _register_tools(mcp_obj: FastMCP) -> None:
 
         Args:
             army: Army name (case-insensitive).
+            game_system: Optional game-system filter. Strongly recommended
+                with ``details=True`` for armies that appear in multiple
+                systems (e.g. AoF vs AoF Skirmish) — point scales differ,
+                so without the filter the roster mixes them.
             version: Optional version pin. When omitted, only units from the
                 latest army-book version are returned.
             details: When true, return full unit cards (same shape as
@@ -358,6 +363,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             lists_tool.list_units(
                 _db(),
                 army,
+                game_system=game_system,
                 version=version,
                 details=details,
                 include_rule_text=include_rule_text,

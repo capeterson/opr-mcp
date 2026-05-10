@@ -89,6 +89,7 @@ def enrich_unit_rows(
     rows: list[sqlite3.Row],
     *,
     include_rule_text: bool = False,
+    rule_doc_ids: list[int] | None = None,
 ) -> list[dict]:
     """Turn raw units+documents rows into the public lookup_unit dict shape.
 
@@ -99,6 +100,15 @@ def enrich_unit_rows(
 
     ``rows`` must select the columns named in :data:`ENRICH_UNIT_COLUMNS`
     (``c.page`` may be NULL via LEFT JOIN; everything else is required).
+
+    ``rule_doc_ids`` controls which documents the rule-text enrichment
+    searches. Callers should pass the result of
+    ``filtered_document_ids(conn, game_system=..., version=...)``
+    *without* the army filter, so core/glossary rulebooks (which have
+    ``army IS NULL``) are included — otherwise common rules like
+    ``Tough`` and ``AP`` resolve to ``description=None`` for units
+    whose army book doesn't duplicate the glossary entry. When omitted
+    the search falls back to the matched units' own documents.
     """
     if not rows:
         return []
@@ -128,9 +138,17 @@ def enrich_unit_rows(
             {"text": ur["option_text"], "points_cost": ur["points_cost"]}
         )
 
-    rule_desc: dict[str, str] = {}
+    per_doc_rules: dict[tuple[int, str], str] = {}
+    core_rules: dict[str, str] = {}
     if include_rule_text:
-        rule_desc = _bulk_rule_descriptions(conn, rows)
+        search_doc_ids = (
+            rule_doc_ids
+            if rule_doc_ids is not None
+            else list({r["document_id"] for r in rows})
+        )
+        per_doc_rules, core_rules = _bulk_rule_descriptions(
+            conn, rows, search_doc_ids,
+        )
 
     out: list[dict] = []
     for r in rows:
@@ -144,13 +162,17 @@ def enrich_unit_rows(
             raw_rules = []
 
         if include_rule_text:
-            rules_field: list = [
-                {
-                    "name": rn,
-                    "description": rule_desc.get(strip_param(rn).lower()),
-                }
-                for rn in raw_rules
-            ]
+            doc_id = r["document_id"]
+            rules_field: list = []
+            for rn in raw_rules:
+                bare = strip_param(rn).lower()
+                # Prefer a definition in the unit's own document (catches
+                # army-specific rule overrides), then fall back to any
+                # core-scoped entry in the broader search set.
+                desc = per_doc_rules.get((doc_id, bare))
+                if desc is None:
+                    desc = core_rules.get(bare)
+                rules_field.append({"name": rn, "description": desc})
         else:
             rules_field = raw_rules
 
@@ -177,16 +199,23 @@ def enrich_unit_rows(
 
 
 def _bulk_rule_descriptions(
-    conn: sqlite3.Connection, rows: list[sqlite3.Row]
-) -> dict[str, str]:
-    """Fetch ``{lowercased-bare-name: description}`` for the union of rule
-    names referenced by any unit in ``rows``.
+    conn: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+    doc_ids: list[int],
+) -> tuple[dict[tuple[int, str], str], dict[str, str]]:
+    """Fetch rule descriptions for the union of rule names referenced by
+    any unit in ``rows``.
 
-    Restricts to ``special_rules`` rows in the same documents the units
-    came from so an unrelated army's "Hero" definition doesn't leak in.
-    Mirrors ``get_special_rule``'s "prefer core scope" tie-breaker by
-    sorting core-scope entries first and keeping the first match per
-    name.
+    Returns two maps:
+
+    * ``per_doc[(document_id, lower_name)] -> description`` keyed by
+      source document so an army-specific override in army A's book
+      can't leak into army B's units when both happen to define the
+      same rule name (e.g. each army's "Hero" entry).
+    * ``core[lower_name] -> description`` containing only rows with
+      ``scope='core'``, used as a fallback when a unit's own document
+      doesn't define the rule (common case: the army book references
+      ``Tough(3)`` without duplicating the core glossary entry).
     """
     bare_names: set[str] = set()
     for r in rows:
@@ -198,28 +227,34 @@ def _bulk_rule_descriptions(
             bare = strip_param(rn).lower()
             if bare:
                 bare_names.add(bare)
-    if not bare_names:
-        return {}
+    if not bare_names or not doc_ids:
+        return {}, {}
 
-    doc_ids = list({r["document_id"] for r in rows})
     name_placeholders = ",".join("?" * len(bare_names))
     doc_placeholders = ",".join("?" * len(doc_ids))
+    # Within a single (document, name) pair, prefer a scope='core' row
+    # over an army-scoped one — mirrors ``get_special_rule``'s
+    # tie-breaker and means books that duplicate a glossary entry as
+    # both scopes resolve to the core text. "First per key wins" picks
+    # up that preference because the SELECT orders core-scope first.
     rule_rows = conn.execute(
         f"""
-        SELECT s.name, s.scope, s.description
+        SELECT s.document_id, s.name, s.scope, s.description
         FROM special_rules s
         WHERE LOWER(s.name) IN ({name_placeholders})
           AND s.document_id IN ({doc_placeholders})
-        ORDER BY LOWER(s.name),
-                 CASE WHEN s.scope = 'core' THEN 0 ELSE 1 END,
-                 s.id
+        ORDER BY CASE WHEN s.scope = 'core' THEN 0 ELSE 1 END, s.id
         """,
         [*bare_names, *doc_ids],
     ).fetchall()
 
-    out: dict[str, str] = {}
+    per_doc: dict[tuple[int, str], str] = {}
+    core: dict[str, str] = {}
     for row in rule_rows:
-        key = row["name"].lower()
-        if key not in out:
-            out[key] = row["description"]
-    return out
+        name_lower = row["name"].lower()
+        key = (row["document_id"], name_lower)
+        if key not in per_doc:
+            per_doc[key] = row["description"]
+        if row["scope"] == "core" and name_lower not in core:
+            core[name_lower] = row["description"]
+    return per_doc, core

@@ -24,6 +24,7 @@ def list_units(
     conn: sqlite3.Connection,
     army: str,
     *,
+    game_system: str | None = None,
     version: str | None = None,
     details: bool = False,
     include_rule_text: bool = False,
@@ -38,10 +39,17 @@ def list_units(
     further enriches each unit's ``rules`` list with descriptions from
     the ``special_rules`` table.
 
+    ``game_system`` narrows multi-system armies to a single ruleset.
+    Without it, an army present in multiple game systems (e.g. AoF and
+    AoF Skirmish) returns a roster that mixes their point scales —
+    pass the filter when a specific ruleset is needed.
+
     Both flags use bulk-fetched joins so the call stays at most three
     SQL statements regardless of roster size.
     """
-    doc_ids = filtered_document_ids(conn, army=army, version=version)
+    doc_ids = filtered_document_ids(
+        conn, game_system=game_system, army=army, version=version,
+    )
     if not doc_ids:
         return []
 
@@ -70,7 +78,17 @@ def list_units(
     """
     params = [army.lower(), *doc_ids]
     rows = conn.execute(sql, params).fetchall()
-    return enrich_unit_rows(conn, rows, include_rule_text=include_rule_text)
+    rule_doc_ids = (
+        filtered_document_ids(conn, game_system=game_system, version=version)
+        if include_rule_text
+        else None
+    )
+    return enrich_unit_rows(
+        conn,
+        rows,
+        include_rule_text=include_rule_text,
+        rule_doc_ids=rule_doc_ids,
+    )
 
 
 def list_documents(conn: sqlite3.Connection) -> list[dict]:
