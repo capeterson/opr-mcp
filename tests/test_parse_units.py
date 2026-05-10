@@ -1225,3 +1225,171 @@ def test_parse_special_rules_section_banner_does_not_bleed():
     assert "Vanguard" in by_name
     assert "AURA SPECIAL RULES" not in by_name["Vanguard"].description
     assert "ARMY SPELLS" not in by_name.get("Stealth Aura", rules[0]).description
+
+
+# --- Codex review follow-ups -----------------------------------------------
+#
+# These tests cover edge cases surfaced by automated review of the
+# six-fix patch above. Each one targets a layout that the initial fix
+# missed.
+
+
+def test_parse_unit_table_form_bare_rule_in_spe_cell():
+    """A non-weapon row whose SPE cell is a single bare rule name
+    (``Mount | - | - | - | Fast``) must still be recognised. Earlier
+    the row was rejected because ``_parse_paren_line`` returns ``None``
+    for a lone bare token — that left the row unconsumed, so the
+    inline scanner picked up ``Mount`` and ``Fast`` (and any
+    following weapon names) as bare unit rules while dropping later
+    table rows from equipment."""
+    s = _section(
+        "Cavalry [3] - 90pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Lance\n-\nA2\n1\n-\n"
+        "Mount\n-\n-\n-\nFast\n"
+        "Hero\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Lance", "Mount"}.issubset(eq_names), eq_names
+    rule_set = set(u.rules)
+    # ``Fast`` from the SPE cell is promoted to unit rules.
+    assert "Fast" in rule_set, u.rules
+    # ``Hero`` after the table is still captured (table-anchored).
+    assert "Hero" in rule_set, u.rules
+    # ``Mount`` is gear, not a rule.
+    assert "Mount" not in rule_set
+
+
+def test_parse_unit_real_upgrade_boundary_not_swallowed_as_subheading():
+    """A real upgrade boundary headed by the bare word ``Upgrade``
+    must terminate the table scan, not be consumed as a sub-heading.
+    Otherwise the rows beneath the ``Upgrade`` heading (option weapons)
+    leak into base equipment."""
+    s = _section(
+        "Squad [5] - 100pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Rifle\n24\"\nA1\n-\n-\n"
+        "Upgrade\n"  # boundary — NOT an "Upgrade SPE" sub-heading
+        "Plasma Rifle\n24\"\nA1\n2\n-\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    # Only the base Rifle is captured; the post-boundary option weapon
+    # must NOT appear in base equipment.
+    assert "Rifle" in eq_names, eq_names
+    assert "Plasma Rifle" not in eq_names, eq_names
+
+
+def test_parse_unit_table_before_qd_lone_rule_captured():
+    """When PyMuPDF emits the weapon table BEFORE the Q/D line, a lone
+    bare rule between the two must still be captured. ``past_table``
+    bypasses the ``past_stats_line`` gate once we're past the table's
+    first consumed line, since table-form weapons are themselves a
+    definitive stat-block anchor."""
+    s = _section(
+        "Militia [10] - 60pts\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Hand Weapon\n-\nA1\n-\n-\n"
+        "Scurry\n"  # lone rule, BEFORE the Q/D line
+        "Quality 5+   Defense 5+\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Scurry" in u.rules, u.rules
+
+
+def test_parse_unit_pre_table_flavor_still_blocked():
+    """Regression guard for the ``past_table`` exemption: pre-table
+    flavor lines like ``Veteran Warriors`` (BEFORE the table's first
+    consumed line) must still be gated out, not captured as rules."""
+    s = _section(
+        "Veteran Warriors\n"  # flavor BEFORE any stat-block signal
+        "Squad [5] - 100pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Rifle\n24\"\nA1\n-\n-\n"
+        "Scurry\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Veteran Warriors" not in u.rules, u.rules
+    assert "Scurry" in u.rules, u.rules
+
+
+def test_parse_special_rules_mid_section_banner_switches_to_spell_mode():
+    """When ``ARMY SPELLS`` appears as a banner mid-section (segmenter
+    didn't open a separate ``Army Spells`` section because PyMuPDF kept
+    everything in one block), entries below the banner must still be
+    flagged ``parametric=False`` — the casting cost ``(N)`` is NOT a
+    parametric argument."""
+    sec = Section(
+        section_type="special_rule",
+        title="Special Rules",
+        blocks=[PageBlock(page=4, text=(
+            "Tough(X) - The unit takes X wounds before being removed.\n"
+            "ARMY SPELLS\n"
+            "Heavenly Strike (1): Target enemy unit takes 4 hits.\n"
+            "Lightning Blast (3): Target enemy unit takes 8 hits with AP(2)."
+        ), bbox=(0, 0, 1, 1))],
+    )
+    rules = parse_special_rules(sec)
+    by_name = {r.name: r for r in rules}
+    # The glossary rule above the banner keeps parametric=True.
+    assert by_name["Tough"].parametric is True
+    # The spells below the banner are NOT parametric.
+    assert {"Heavenly Strike", "Lightning Blast"}.issubset(set(by_name))
+    assert by_name["Heavenly Strike"].parametric is False
+    assert by_name["Lightning Blast"].parametric is False
+
+
+def test_parse_special_rules_glued_banner_prefix_stripped():
+    """When a banner is GLUED onto the first entry's line
+    (``Army Spells: Heavenly Strike (1): ...``), the heading must be
+    stripped — otherwise the line indexes as a bogus rule named
+    ``Army Spells`` instead of the real first entry."""
+    sec = Section(
+        section_type="special_rule",
+        title="Special Rules",
+        blocks=[PageBlock(page=5, text=(
+            "Furious - When charging the unit gets +1 attack in melee.\n"
+            "Army Spells: Heavenly Strike (1): Target enemy unit takes 4 hits.\n"
+            "Lightning Blast (3): Target enemy unit takes 8 hits."
+        ), bbox=(0, 0, 1, 1))],
+    )
+    rules = parse_special_rules(sec)
+    names = {r.name for r in rules}
+    # The bogus banner-named rule must NOT be created.
+    assert "Army Spells" not in names, names
+    # The real entries are indexed.
+    assert {"Furious", "Heavenly Strike", "Lightning Blast"}.issubset(names), names
+    # And spell mode applies to the entries below the glued banner.
+    by_name = {r.name: r for r in rules}
+    assert by_name["Heavenly Strike"].parametric is False
+    assert by_name["Lightning Blast"].parametric is False
+
+
+def test_parse_special_rules_glued_aura_banner_prefix_stripped():
+    """Same glued-prefix shape for ``Aura Special Rules: ...`` — the
+    heading is stripped and the first entry is the real aura, not the
+    banner itself."""
+    sec = Section(
+        section_type="special_rule",
+        title="Special Rules",
+        blocks=[PageBlock(page=6, text=(
+            "Vanguard - This unit may move 6\" in any direction.\n"
+            "Aura Special Rules: Stealth Aura - This model and its unit get Stealth."
+        ), bbox=(0, 0, 1, 1))],
+    )
+    rules = parse_special_rules(sec)
+    names = {r.name for r in rules}
+    assert "Aura Special Rules" not in names, names
+    assert {"Vanguard", "Stealth Aura"}.issubset(names), names
