@@ -16,7 +16,8 @@ from pydantic import AnyUrl
 
 from opr_mcp import db
 from opr_mcp.auth.discord_provider import CallbackError, DiscordOAuthProvider
-from opr_mcp.auth.storage import AuthStorage
+from opr_mcp.auth.storage import AuthStorage, StoredDiscordTokens
+from opr_mcp.auth.storage import now as storage_now
 from opr_mcp.config import AuthConfig
 
 
@@ -301,17 +302,194 @@ async def test_authorize_defaults_scopes_when_client_omits(provider):
     assert "mcp" in issued.scopes
 
 
-async def test_refresh_does_not_extend_grant_lifetime(provider):
-    """Rotating a refresh token must preserve the original absolute expiry so
-    a removed-from-guild user can't extend access by repeated refreshing."""
+async def test_refresh_slides_deadline_when_guild_check_passes(provider):
+    """A successful Discord re-check during refresh extends the grant deadline
+    so well-behaved clients never need to re-auth in a browser."""
+    import time
+
     _, first = await _issue_pair(provider)
     client = await provider.get_client("client-1")
     rt1 = await provider.load_refresh_token(client, first.refresh_token)
     original_expiry = rt1.expires_at
 
+    # Sleep one second so the new deadline is visibly later than the original.
+    time.sleep(1.1)
+    second = await provider.exchange_refresh_token(client, rt1, ["mcp"])
+    rt2 = await provider.load_refresh_token(client, second.refresh_token)
+    assert rt2.expires_at > original_expiry
+
+
+async def test_refresh_revokes_grant_when_user_kicked_from_guild(tmp_db):
+    """A user who was kicked between issuance and refresh must be denied,
+    and the grant must be revoked so the access token can't keep working."""
+    from opr_mcp.auth.discord import DISCORD_API_GUILDS
+
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+    cfg = _make_config(guild_id="G1")
+
+    # First call: user is in the guild (so we can issue tokens). After that
+    # call has happened, flip the response so the next /guilds call shows
+    # the user has been kicked.
+    state = {"guilds_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/oauth2/token":
+            return httpx.Response(200, json={
+                "access_token": "discord-access", "refresh_token": "discord-refresh",
+                "expires_in": 3600,
+            })
+        if request.url.path == "/api/users/@me":
+            return httpx.Response(200, json={"id": "U1", "username": "alice"})
+        if request.url.path == DISCORD_API_GUILDS.removeprefix("https://discord.com"):
+            state["guilds_calls"] += 1
+            if state["guilds_calls"] == 1:
+                return httpx.Response(200, json=[{"id": "G1"}])
+            return httpx.Response(200, json=[{"id": "G2"}])
+        return httpx.Response(404, json={"error": "unexpected"})
+
+    p = DiscordOAuthProvider(cfg, store, http_client_factory=_httpx_factory(handler))
+    await store.save_client(_make_client())
+    _, first = await _issue_pair(p)
+    client = await p.get_client("client-1")
+    rt = await p.load_refresh_token(client, first.refresh_token)
+
+    with pytest.raises(TokenError) as exc:
+        await p.exchange_refresh_token(client, rt, ["mcp"])
+    assert exc.value.error == "invalid_grant"
+    # Grant is gone — the rotated access token from the same grant must also
+    # be invalid (otherwise the kicked user keeps working until access TTL).
+    assert await p.load_access_token(first.access_token) is None
+
+
+async def test_refresh_preserves_deadline_when_stash_missing(provider):
+    """Legacy grants (issued before Discord-token storage existed) have no
+    stash, so we can't re-validate. Preserve the original deadline rather
+    than either denying the user or sliding without a check."""
+    _, first = await _issue_pair(provider)
+    client = await provider.get_client("client-1")
+    rt1 = await provider.load_refresh_token(client, first.refresh_token)
+    original_expiry = rt1.expires_at
+
+    # Simulate "legacy grant": the stash that the callback wrote doesn't exist.
+    await provider._store.delete_discord_tokens("U1")
+
     second = await provider.exchange_refresh_token(client, rt1, ["mcp"])
     rt2 = await provider.load_refresh_token(client, second.refresh_token)
     assert rt2.expires_at == original_expiry
+
+
+async def test_refresh_preserves_deadline_when_discord_refresh_fails(tmp_db):
+    """If the stashed access token is past expiry and Discord rejects our
+    refresh token, treat it as 'unknown membership' — preserve the deadline
+    so the user falls back to a browser auth at the natural expiry, but
+    don't punish them for a Discord-side outage."""
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+    cfg = _make_config(guild_id="G1")
+
+    state = {"refresh_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/oauth2/token":
+            # First call (auth code exchange) succeeds; subsequent refresh
+            # calls are rejected (simulating a revoked refresh token).
+            state["refresh_calls"] += 1
+            if state["refresh_calls"] == 1:
+                return httpx.Response(200, json={
+                    "access_token": "discord-access", "refresh_token": "discord-refresh",
+                    "expires_in": 3600,
+                })
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        if request.url.path == "/api/users/@me":
+            return httpx.Response(200, json={"id": "U1", "username": "alice"})
+        if request.url.path == "/api/users/@me/guilds":
+            return httpx.Response(200, json=[{"id": "G1"}])
+        return httpx.Response(404, json={"error": "unexpected"})
+
+    p = DiscordOAuthProvider(cfg, store, http_client_factory=_httpx_factory(handler))
+    await store.save_client(_make_client())
+    _, first = await _issue_pair(p)
+
+    # Force the stashed access token to be expired so the next refresh tries
+    # to use the (mocked-to-fail) Discord refresh token.
+    await store.save_discord_tokens(
+        StoredDiscordTokens(
+            discord_user_id="U1",
+            access_token="discord-access",
+            refresh_token="discord-refresh",
+            expires_at=storage_now() - 1,
+            updated_at=storage_now(),
+        )
+    )
+
+    client = await p.get_client("client-1")
+    rt1 = await p.load_refresh_token(client, first.refresh_token)
+    original_expiry = rt1.expires_at
+
+    second = await p.exchange_refresh_token(client, rt1, ["mcp"])
+    rt2 = await p.load_refresh_token(client, second.refresh_token)
+    # Deadline preserved (no slide), grant not revoked.
+    assert rt2.expires_at == original_expiry
+
+
+async def test_refresh_uses_discord_refresh_token_when_access_expired(tmp_db):
+    """When the stashed Discord access token is past expiry, we should refresh
+    it via Discord's token endpoint and persist the new pair."""
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+    cfg = _make_config(guild_id="G1")
+
+    state = {"token_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/oauth2/token":
+            state["token_calls"] += 1
+            if state["token_calls"] == 1:
+                # initial code exchange
+                return httpx.Response(200, json={
+                    "access_token": "discord-access-1", "refresh_token": "discord-refresh-1",
+                    "expires_in": 3600,
+                })
+            # refresh-token grant
+            assert request.read().decode().find("grant_type=refresh_token") >= 0
+            return httpx.Response(200, json={
+                "access_token": "discord-access-2", "refresh_token": "discord-refresh-2",
+                "expires_in": 3600,
+            })
+        if request.url.path == "/api/users/@me":
+            return httpx.Response(200, json={"id": "U1", "username": "alice"})
+        if request.url.path == "/api/users/@me/guilds":
+            return httpx.Response(200, json=[{"id": "G1"}])
+        return httpx.Response(404, json={"error": "unexpected"})
+
+    p = DiscordOAuthProvider(cfg, store, http_client_factory=_httpx_factory(handler))
+    await store.save_client(_make_client())
+    _, first = await _issue_pair(p)
+
+    # Backdate the stashed access token so revalidation has to refresh.
+    await store.save_discord_tokens(
+        StoredDiscordTokens(
+            discord_user_id="U1",
+            access_token="discord-access-1",
+            refresh_token="discord-refresh-1",
+            expires_at=storage_now() - 1,
+            updated_at=storage_now(),
+        )
+    )
+
+    client = await p.get_client("client-1")
+    rt = await p.load_refresh_token(client, first.refresh_token)
+    await p.exchange_refresh_token(client, rt, ["mcp"])
+
+    # Stash got rotated to the new pair.
+    refreshed = await store.load_discord_tokens("U1")
+    assert refreshed is not None
+    assert refreshed.access_token == "discord-access-2"
+    assert refreshed.refresh_token == "discord-refresh-2"
 
 
 async def test_refresh_preserves_resource_binding(tmp_db):
