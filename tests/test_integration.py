@@ -80,6 +80,23 @@ def test_ingest_is_idempotent(tmp_db, tmp_path):
     assert s2.skipped == 1
 
 
+def test_ingest_skips_byte_identical_duplicate_under_different_name(tmp_db, tmp_path):
+    # Regression: an orphan file left over from a Forge filename-format
+    # change has the same bytes as the new download, so both produce the
+    # same sha256. The second ingest must skip cleanly instead of tripping
+    # the UNIQUE(sha256) constraint.
+    src = _make_pdf(tmp_path / "aof__czejmujf-qcsdwsa.pdf")
+    dup = tmp_path / "aof__czejmujf-qcsdwsa__2pknwn0hzybj-hjg5lwis.pdf"
+    dup.write_bytes(src.read_bytes())
+    conn = db.open_db(tmp_db)
+    s1 = ingest_pdf(conn, src)
+    assert s1.documents == 1 and s1.skipped == 0
+    s2 = ingest_pdf(conn, dup)
+    assert s2.documents == 0 and s2.skipped == 1
+    n_docs = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    assert n_docs == 1
+
+
 def test_search_rules_finds_content(ingested_db):
     results = search_rules.run(ingested_db, "how does Tough work")
     assert results, "expected at least one result"

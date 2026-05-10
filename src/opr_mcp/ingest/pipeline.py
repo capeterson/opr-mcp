@@ -71,6 +71,22 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
     if existing:
         _delete_existing(conn, existing["id"])
 
+    # Same content already ingested under a different name — e.g. an orphan
+    # left over from a Forge filename-format change, or a manually duplicated
+    # PDF. Treat as a no-op rather than tripping the UNIQUE(sha256) constraint;
+    # the caller can clean up the duplicate file at their leisure.
+    duplicate = conn.execute(
+        "SELECT filename FROM documents WHERE sha256 = ?",
+        (digest,),
+    ).fetchone()
+    if duplicate:
+        log.info(
+            "Skipping %s: identical content already ingested as %s",
+            path.name, duplicate["filename"],
+        )
+        stats.skipped += 1
+        return stats
+
     meta = detect_metadata(path)
     pages = page_count(path)
 
