@@ -135,6 +135,35 @@ def _normalize_heading(line: str) -> str:
     return line.strip().lower().rstrip(":").rstrip()
 
 
+# Real OPR upgrade-section anchor lines start with ``Upgrade`` or
+# ``Replace`` and are short instruction phrases like ``Upgrade with
+# one`` / ``Replace Heavy Hand Weapon``. These end the unit-profile
+# scan because everything below them is option text, not base
+# equipment or rules. Mirrors the anchor-detection in
+# :mod:`parse_upgrades` so the two stages stay in sync — but
+# duplicated rather than imported to avoid any circular-import risk
+# while parse_units is being refactored.
+_UPGRADE_ANCHOR_RE = re.compile(
+    r"^\s*(?:Upgrade|Replace)(?:\s+\S+){0,7}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_upgrade_section_anchor(line: str) -> bool:
+    """True if ``line`` is the heading line of an upgrade group.
+
+    Excludes free prose like ``Replace one model's weapon with a magic
+    sword`` (apostrophe / >7 tokens) and lines with parens (those are
+    option bodies). Mirrors :func:`parse_upgrades._is_group_anchor`.
+    """
+    s = line.strip()
+    if not s or len(s) > 80:
+        return False
+    if "(" in s or ")" in s or s.endswith((".", ":", ",", ";")):
+        return False
+    return _UPGRADE_ANCHOR_RE.match(s) is not None
+
+
 def _is_profile_boundary(line: str) -> bool:
     """True if ``line`` is a heading that ends the unit's profile scan.
 
@@ -143,6 +172,14 @@ def _is_profile_boundary(line: str) -> bool:
     ``Upgrades Plasma Pistol (12", A1)`` still terminates — PDF
     extraction sometimes joins the heading and the first row onto a
     single line.
+
+    Upgrade-section anchor lines (``Upgrade with one``, ``Replace Heavy
+    Hand Weapon``) are also boundaries: everything below them is
+    option text, not base equipment or rules. Without this check, the
+    parser pulls upgrade-option weapons into the unit's base
+    equipment field, producing rows like ``Heavy Halberd`` listed as
+    base gear when it's actually a +30pt replace option. This was the
+    dominant remaining bug surfaced by the local-corpus spot-check.
 
     A glossary banner printed in ALL CAPS (``SPECIAL RULES``) is also a
     hard boundary. Other in-profile labels in ALL CAPS (``EQUIPMENT`` /
@@ -156,6 +193,8 @@ def _is_profile_boundary(line: str) -> bool:
         norm.startswith(h + " ") or norm.startswith(h + ":")
         for h in _PROFILE_BOUNDARY_HEADINGS
     ):
+        return True
+    if _is_upgrade_section_anchor(line):
         return True
     # ALL-CAPS leading prefix: extract the longest run of uppercase /
     # space / hyphen at the start of the line and test it against the
@@ -400,6 +439,98 @@ def _parse_paren_line(line: str) -> tuple[list[dict], list[str]] | None:
     return equipment, rule_tokens
 
 
+# Stat-table column header (``Weapon`` / ``RNG`` / ``ATK`` / ``AP`` /
+# ``SPE``) split across five separate PyMuPDF text elements. When this
+# pattern appears in a unit section, the next N rows of 5 lines each
+# encode the unit's base equipment in tabular form (one weapon per
+# row), distinct from the inline ``Name (body)`` form synthetic test
+# fixtures use. This is the standard layout in every modern OPR army
+# book.
+_STAT_TABLE_HEADER = ("weapon", "rng", "atk", "ap", "spe")
+_STAT_TABLE_ATK_RE = re.compile(r"^A\d+x?$", re.IGNORECASE)
+
+
+def _extract_table_equipment(text: str) -> list[dict]:
+    """Pull base-equipment rows from the OPR stat-table column layout.
+
+    OPR unit cards render base weapons as a table with five columns
+    (``Weapon`` / ``RNG`` / ``ATK`` / ``AP`` / ``SPE``). PyMuPDF
+    extracts each cell as its own line, so the post-header text reads:
+
+        Weapon
+        RNG
+        ATK
+        AP
+        SPE
+        Hand Weapon       <- weapon row N: name
+        -                 <- weapon row N: range (or "-" for melee)
+        A3                <- weapon row N: attacks marker
+        -                 <- weapon row N: AP value (or "-")
+        -                 <- weapon row N: special (or "-")
+        Heavy Hand Weapon <- weapon row N+1: name
+        ...
+
+    We scan for the ``Weapon`` ``RNG`` ``ATK`` ``AP`` ``SPE`` sequence
+    and read groups of five lines as rows until a non-row line appears
+    (an upgrade-section anchor, an empty stretch, or anything whose
+    third line doesn't look like an attacks marker).
+
+    Returns equipment dicts in the same shape as the inline path:
+    ``{"name": "Heavy Hand Weapon", "details": "A3, AP(1)"}``. The
+    ``details`` string omits ``-`` placeholders and wraps a bare AP
+    value as ``AP(N)`` to stay consistent with rule-text expectations
+    elsewhere.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    n = len(lines)
+    # Find the column header.
+    start = -1
+    for i in range(n - 4):
+        if tuple(lines[i + j].lower() for j in range(5)) == _STAT_TABLE_HEADER:
+            start = i + 5
+            break
+    if start < 0:
+        return []
+
+    out: list[dict] = []
+    i = start
+    while i + 4 < n:
+        row = lines[i : i + 5]
+        name, rng, atk, ap, spe = row
+        # Hard stop on a profile boundary that crept into the table —
+        # an upgrade-section anchor like ``Replace Hand Weapon``
+        # appearing in place of the next weapon name means the table
+        # is done.
+        if _is_profile_boundary(name):
+            break
+        # Guard: the ATK column must look like ``A<n>``. If it
+        # doesn't, the rows are no longer aligned (PyMuPDF has slipped
+        # in a non-table line) and we must not continue or we'll start
+        # emitting garbage.
+        if not _STAT_TABLE_ATK_RE.match(atk):
+            break
+        # Reject if the name field looks like an obvious non-weapon
+        # (a dash, a number, or any of the column-header words).
+        if name == "-" or name.lower() in _STAT_TABLE_HEADER:
+            break
+
+        details: list[str] = []
+        if rng and rng != "-":
+            details.append(rng)
+        details.append(atk)
+        if ap and ap != "-":
+            # Bare numeric AP wraps to ``AP(N)`` for consistency with
+            # the inline-form output (which already includes the
+            # ``AP(N)`` literal).
+            details.append(f"AP({ap})" if ap.isdigit() else ap)
+        if spe and spe != "-":
+            details.append(spe)
+        out.append({"name": name, "details": ", ".join(details)})
+        i += 5
+
+    return out
+
+
 def _line_anchors_stat_block(line: str) -> bool:
     """True if ``line`` is a definitive unit-profile signal (a weapon line,
     a parametric-rule line, a multi-token bare-rule line, or any clean
@@ -553,6 +684,20 @@ def parse_unit(section: Section) -> ParsedUnit | None:
 
     equipment: list[dict] = []
     seen_equipment: set[tuple[str, str]] = set()
+
+    # Real OPR unit cards encode base weapons in a five-column table,
+    # not as inline ``Name (body)`` tokens. Run the table-format
+    # extractor first so its rows seed the result, then let the
+    # inline-form scan below dedupe and add anything else (defensive
+    # gear like ``Combat Shield (Shield Wall)`` listed alongside a
+    # weapon, etc.).
+    for it in _extract_table_equipment(text):
+        key = (it["name"].lower(), it["details"].lower())
+        if key in seen_equipment:
+            continue
+        seen_equipment.add(key)
+        equipment.append(it)
+
     rules: list[str] = []
     seen_rules: set[str] = set()
     # First pass: decide up-front whether the section has any definitive

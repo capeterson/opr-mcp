@@ -7,7 +7,7 @@ import sqlite_vec
 
 from .config import EMBED_DIM, db_path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA = f"""
@@ -56,6 +56,20 @@ CREATE TABLE IF NOT EXISTS units (
     raw_text        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_units_lookup ON units(army, name);
+
+CREATE TABLE IF NOT EXISTS unit_upgrades (
+    id              INTEGER PRIMARY KEY,
+    document_id     INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    unit_id         INTEGER NOT NULL REFERENCES units(id) ON DELETE CASCADE,
+    group_index     INTEGER NOT NULL,
+    group_kind      TEXT NOT NULL,
+    option_index    INTEGER NOT NULL,
+    option_text     TEXT NOT NULL,
+    points_cost     INTEGER NOT NULL,
+    raw_text        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_unit_upgrades_unit ON unit_upgrades(unit_id);
+CREATE INDEX IF NOT EXISTS idx_unit_upgrades_doc ON unit_upgrades(document_id);
 
 CREATE TABLE IF NOT EXISTS special_rules (
     id            INTEGER PRIMARY KEY,
@@ -221,17 +235,58 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
+    """Idempotently create / migrate the schema to the current version.
+
+    Migrations run forward only. Steps that are purely additive (new tables,
+    new indexes) are folded into the SCHEMA script via ``CREATE IF NOT
+    EXISTS`` so a fresh DB and an in-place upgrade reach the same shape.
+    Non-additive migrations (column rename, column drop) get a dedicated
+    branch in :func:`_migrate_forward`.
+    """
     conn.executescript(SCHEMA)
     cur = conn.execute("SELECT version FROM schema_version LIMIT 1")
     row = cur.fetchone()
     if row is None:
         conn.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
-    elif row[0] != SCHEMA_VERSION:
-        raise RuntimeError(
-            f"DB schema version mismatch: file has {row[0]}, code expects {SCHEMA_VERSION}. "
-            "Re-create the DB with `opr-mcp ingest` after deleting the existing file."
-        )
+    else:
+        current = int(row[0])
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"DB schema version mismatch: file has {current}, code expects "
+                f"{SCHEMA_VERSION}. The file was written by a newer version of "
+                "opr-mcp than this build; upgrade the package or recreate the DB."
+            )
+        if current < SCHEMA_VERSION:
+            _migrate_forward(conn, current)
+            conn.execute(
+                "UPDATE schema_version SET version = ? WHERE version = ?",
+                (SCHEMA_VERSION, current),
+            )
     conn.commit()
+
+
+def _migrate_forward(conn: sqlite3.Connection, from_version: int) -> None:
+    """Apply schema migrations from ``from_version`` to ``SCHEMA_VERSION``.
+
+    The SCHEMA script (which uses ``CREATE TABLE IF NOT EXISTS``) has already
+    been executed by the caller, so additive migrations are no-ops here.
+    Only versions that need *destructive* edits (column renames, drops,
+    backfills) need an explicit branch.
+    """
+    # 1 -> 2 added the documents.version column. SQLite ALTER TABLE ADD
+    # COLUMN is fine, but the v1 schema is too old to migrate cleanly
+    # (predates the chunks_vec / FTS5 setup), so reject it.
+    if from_version < 2:
+        raise RuntimeError(
+            f"DB schema version {from_version} is too old to migrate "
+            "in place. Delete the DB file and run `opr-mcp ingest` to "
+            "rebuild from scratch."
+        )
+    # 2 -> 3 added the unit_upgrades table. Already created by SCHEMA.
+    # Existing DBs will have the new table empty until the user re-runs
+    # `opr-mcp reingest` (or any new PDF lands and gets parsed).
+    if from_version < 3:
+        pass  # purely additive; nothing extra to do
 
 
 def open_db(path: Path | None = None) -> sqlite3.Connection:

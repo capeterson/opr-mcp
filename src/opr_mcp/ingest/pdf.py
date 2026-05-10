@@ -60,7 +60,10 @@ _FTL_TOKEN_RE = re.compile(r"\bftl\b")
 
 _BANNER_RE = re.compile(
     r"^\s*(?P<sys>AOFQAI|AOFQ|AOFR|AOFS|AOF|GFSQAI|GFSQ|GFS|GFF|FF|GF|FTL)"
-    r"\s*-\s*(?P<army>[A-Z][A-Z' &]+?)\s*V(?P<version>[\d.]+)\s*$",
+    # Army-name body: letters, spaces, apostrophes, ampersands, AND hyphens
+    # (catches ``SKY-CITY DWARVES``, ``DEEP-SEA ELVES``, etc.). The leading
+    # ``[A-Z]`` keeps the hyphen from being interpreted as a leading dash.
+    r"\s*-\s*(?P<army>[A-Z][A-Z'\- &]+?)\s*V(?P<version>[\d.]+)\s*$",
     re.MULTILINE,
 )
 # AI variants render the same army books with AI-friendly formatting; route

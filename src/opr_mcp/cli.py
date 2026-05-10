@@ -93,6 +93,7 @@ def stats() -> None:
         "documents": conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0],
         "chunks": conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
         "units": conn.execute("SELECT COUNT(*) FROM units").fetchone()[0],
+        "unit_upgrades": conn.execute("SELECT COUNT(*) FROM unit_upgrades").fetchone()[0],
         "special_rules": conn.execute("SELECT COUNT(*) FROM special_rules").fetchone()[0],
     }
     p = db_path()

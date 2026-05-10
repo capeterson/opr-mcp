@@ -52,8 +52,16 @@ packages = ["src/opr_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# Default run skips ``local_corpus`` because those tests depend on the
+# user's licensed PDF library under ``opr-data/`` (gitignored, never
+# uploaded). Run them locally with ``pytest -m local_corpus`` after
+# dropping PDFs in opr-data/. CI never sets this corpus up, so the
+# default ``-m "not local_corpus"`` keeps GitHub Actions runs clean.
+addopts = "-q -m 'not local_corpus'"
 asyncio_mode = "auto"
+markers = [
+    "local_corpus: validates parser end-to-end against ./opr-data/. Skipped by default; run with `pytest -m local_corpus`. Never enable in CI — copyrighted PDFs must not reach the remote.",
+]
 
 [tool.ruff]
 line-length = 100
