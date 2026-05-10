@@ -148,6 +148,11 @@ def serve(
 
     from .watch import start_initial_ingest_async, start_watcher
     pdf_dir.mkdir(parents=True, exist_ok=True)
+    # Initialise the schema synchronously before any writer thread starts.
+    # Otherwise the ingest thread's open_db() races with the main thread's
+    # later open_db() — both call executescript(SCHEMA) under a write lock,
+    # and the loser bails out with "database is locked".
+    db.open_db().close()
     # Run initial ingest off-thread so the MCP server can start serving
     # queries immediately. Tools attach an indexing-status warning to
     # responses while the background pass is still running.
