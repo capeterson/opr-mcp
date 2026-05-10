@@ -1,15 +1,8 @@
 from __future__ import annotations
 
-import re
 import sqlite3
 
-from . import filtered_document_ids
-
-_PARAM_RE = re.compile(r"\s*\([^)]*\)\s*$")
-
-
-def _strip_param(name: str) -> str:
-    return _PARAM_RE.sub("", name).strip()
+from . import filtered_document_ids, strip_param
 
 
 def run(
@@ -20,7 +13,7 @@ def run(
     game_system: str | None = None,
     version: str | None = None,
 ) -> dict | None:
-    bare = _strip_param(name)
+    bare = strip_param(name)
     if not bare:
         return None
 

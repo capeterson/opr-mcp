@@ -120,22 +120,23 @@ Tools exposed:
 | Tool | Use it for |
 |---|---|
 | `search_rules(query, limit?, game_system?, army?)` | Free-text questions, cross-source lookups |
-| `lookup_unit(name, army?)` | Stats and equipment for a named unit |
-| `lookup_upgrades(name, army?, game_system?)` | Structured upgrade groups + exact point costs for a unit |
+| `lookup_unit(name, army?, game_system?, include_rule_text?)` | Stats, equipment, named rules, AND structured `upgrade_groups` (option text + exact point cost) for a named unit, in a single call |
 | `get_special_rule(name, scope?)` | Definition of a single rule (strips `(X)`) |
 | `list_armies()` | Inventory of armies with counts |
-| `list_units(army)` | Roster for one army |
+| `list_units(army, details?, include_rule_text?)` | Roster for one army — lightweight by default, full unit cards with `details=True` |
 | `list_documents()` | All ingested PDFs |
 | `index_status()` | Whether ingest is currently running and whether the initial sweep has completed |
 
-`lookup_upgrades` is the right tool for any "how much does upgrade X cost"
-question. Point costs vary across game systems (AoF / AoFR / AoFS / AoFQ have
-different scales) for the same unit, so pass `game_system=` when the user has
-a specific system in mind; otherwise the result includes one row per
-`(game_system, army)` so callers can compare side-by-side. `search_rules`
-remains useful for free-text rules questions but should not be used for
-upgrade costs — its results are PDF-extracted upgrade-table prose, where
-option↔cost pairing is unreliable.
+`lookup_unit` is the right tool for any "how much does upgrade X cost"
+question — its `upgrade_groups` field gives exact (option text, points)
+pairs parsed from the structured upgrade table. Point costs vary across
+game systems (AoF / AoFR / AoFS / AoFQ have different scales) for the same
+unit, so pass `game_system=` when the user has a specific system in mind;
+otherwise the result includes one row per `(game_system, army)` so callers
+can compare side-by-side. `search_rules` remains useful for free-text rules
+questions but should not be used for upgrade costs — its results are
+PDF-extracted upgrade-table prose, where option↔cost pairing is
+unreliable.
 
 The MCP server stays online while the index is being built or refreshed.
 Startup ingest runs on a background thread, and PDF watcher reingests run on
@@ -318,11 +319,12 @@ Tests stub out the real embedding model so they run offline.
 - **Heuristic parser.** Some unit cards in some books fall back to chunk-only
   storage. Search still finds them; structured `lookup_unit` may miss them. Parse
   failures are logged with PDF + page numbers.
-- **Upgrade tables.** Structured upgrade extraction (`lookup_upgrades`) is
-  best-effort line-based parsing of the PyMuPDF text dump. Books with non-standard
-  upgrade-section formatting (e.g. multi-column tables that PyMuPDF interleaves
-  unexpectedly) may yield partial results. Falls back gracefully — anything the
-  structured parser misses is still searchable as text via `search_rules`.
+- **Upgrade tables.** Structured upgrade extraction (returned in
+  `lookup_unit`'s `upgrade_groups` field) is best-effort line-based parsing of
+  the PyMuPDF text dump. Books with non-standard upgrade-section formatting
+  (e.g. multi-column tables that PyMuPDF interleaves unexpectedly) may yield
+  partial results. Falls back gracefully — anything the structured parser
+  misses is still searchable as text via `search_rules`.
 - **No reranker.** RRF over BM25 + vector is good enough at this corpus size.
 
 ## Out of scope

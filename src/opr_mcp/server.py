@@ -29,7 +29,6 @@ from .config import (
 from .tools import get_special_rule as get_special_rule_tool
 from .tools import lists as lists_tool
 from .tools import lookup_unit as lookup_unit_tool
-from .tools import lookup_upgrades as lookup_upgrades_tool
 from .tools import search_rules as search_rules_tool
 
 log = logging.getLogger(__name__)
@@ -241,66 +240,55 @@ def _register_tools(mcp_obj: FastMCP) -> None:
     def lookup_unit(
         name: str,
         army: str | None = None,
-        version: str | None = None,
-        ctx: Context | None = None,
-    ) -> Any:
-        """Look up an OPR unit by name. Returns structured stats and equipment.
-
-        Use this when the user names a specific unit and wants its profile. Returns
-        multiple rows when the same name appears in multiple armies.
-
-        Each result includes a ``has_upgrades`` boolean indicating whether the
-        unit has any structured upgrade options in the index. When true, call
-        ``lookup_upgrades`` for the option list and point costs.
-
-        Args:
-            name: Unit name (or substring). Case-insensitive.
-            army: Optional army filter to disambiguate.
-            version: Optional version pin (e.g. "3.5.3"). When omitted, only the
-                latest army-book version contributes results.
-        """
-        return _finalize(
-            lookup_unit_tool.run(_db(), name, army=army, version=version),
-            ctx,
-        )
-
-    @mcp_obj.tool()
-    def lookup_upgrades(
-        name: str,
-        army: str | None = None,
         game_system: str | None = None,
         version: str | None = None,
+        include_rule_text: bool = False,
         ctx: Context | None = None,
     ) -> Any:
-        """Look up structured upgrade options + point costs for a unit.
+        """Look up an OPR unit by name. Returns full unit profile in one call.
 
-        Use this whenever the user asks about the COST of an upgrade
-        (e.g. "how much for a Halberd on a Volcanic Leader"). Do not
-        use ``search_rules`` for cost questions — search returns raw
-        chunks of upgrade-table text where option↔cost pairing is
-        unreliable, and point costs differ between game systems for the
-        same unit.
+        Use this when the user names a specific unit. Returns multiple rows
+        when the same name appears in multiple armies, and each row carries
+        the unit's stats, equipment, named rules, and the structured
+        ``upgrade_groups`` (option text + exact point cost) parsed from the
+        army-book PDF. ``upgrade_groups`` is always present (empty list if
+        the unit has no structured upgrades), so a follow-up call is
+        unnecessary.
+
+        Do not use ``search_rules`` for upgrade-cost questions — it returns
+        raw chunks of upgrade-table text where option↔cost pairing is
+        unreliable. Point costs also differ between game systems for the
+        same unit, so pass ``game_system`` when the user has one in mind.
 
         Args:
             name: Unit name (or substring). Case-insensitive.
             army: Optional army filter to disambiguate.
-            game_system: Optional game-system filter. Stored values
-                are ``"aof"`` (Age of Fantasy), ``"aofr"`` (Regiments),
+            game_system: Optional game-system filter. Stored values are
+                ``"aof"`` (Age of Fantasy), ``"aofr"`` (Regiments),
                 ``"aofq"`` (Quest, also covers AOFQAI), ``"gf"`` (Grimdark
-                Future), ``"gff"`` (Firefight), ``"gfsq"`` (Grimdark
-                Future Quest, also covers GFSQAI), ``"skirmish"``
-                (covers BOTH AOF Skirmish and GF Skirmish — the banner
-                map collapses ``AOFS`` and ``GFS`` to a single value),
-                ``"ftl"`` (Warfleets FTL), and ``"core"`` (core
-                rulebooks). Strongly recommended for any cost question
-                — point scales differ across game systems.
-            version: Optional version pin. When omitted, only the
-                latest army-book version per (game_system, army) is
-                used.
+                Future), ``"gff"`` (Firefight), ``"gfsq"`` (Grimdark Future
+                Quest, also covers GFSQAI), ``"skirmish"`` (covers BOTH AOF
+                Skirmish and GF Skirmish — the banner map collapses
+                ``AOFS`` and ``GFS`` to a single value), ``"ftl"``
+                (Warfleets FTL), and ``"core"`` (core rulebooks). Strongly
+                recommended for any cost question — point scales differ
+                across game systems.
+            version: Optional version pin (e.g. "3.5.3"). When omitted,
+                only the latest army-book version per (game_system, army)
+                contributes results.
+            include_rule_text: When true, ``rules`` is returned as a list of
+                ``{"name", "description"}`` dicts instead of bare name
+                strings — eliminating the need to call ``get_special_rule``
+                per rule. Default false to keep the response small.
         """
         return _finalize(
-            lookup_upgrades_tool.run(
-                _db(), name, army=army, game_system=game_system, version=version,
+            lookup_unit_tool.run(
+                _db(),
+                name,
+                army=army,
+                game_system=game_system,
+                version=version,
+                include_rule_text=include_rule_text,
             ),
             ctx,
         )
@@ -341,17 +329,47 @@ def _register_tools(mcp_obj: FastMCP) -> None:
     @mcp_obj.tool()
     def list_units(
         army: str,
+        game_system: str | None = None,
         version: str | None = None,
+        details: bool = False,
+        include_rule_text: bool = False,
         ctx: Context | None = None,
     ) -> Any:
         """List all units for a given army (case-insensitive match on army name).
 
+        Default response is a lightweight roster with five fields per unit
+        (``name``, ``base_points``, ``qty``, ``quality``, ``defense``). Pass
+        ``details=True`` to get full unit cards in the same shape as
+        ``lookup_unit`` — including ``upgrade_groups`` and source metadata —
+        so a single call can surface a whole army's profile. Bulk-fetched
+        joins keep the call at a fixed number of SQL statements regardless
+        of roster size.
+
         Args:
             army: Army name (case-insensitive).
+            game_system: Optional game-system filter. Strongly recommended
+                with ``details=True`` for armies that appear in multiple
+                systems (e.g. AoF vs AoF Skirmish) — point scales differ,
+                so without the filter the roster mixes them.
             version: Optional version pin. When omitted, only units from the
                 latest army-book version are returned.
+            details: When true, return full unit cards (same shape as
+                ``lookup_unit``) instead of the lightweight roster.
+            include_rule_text: When true (and ``details=True``), each unit's
+                ``rules`` list is returned as ``{"name", "description"}``
+                dicts. Default false.
         """
-        return _finalize(lists_tool.list_units(_db(), army, version=version), ctx)
+        return _finalize(
+            lists_tool.list_units(
+                _db(),
+                army,
+                game_system=game_system,
+                version=version,
+                details=details,
+                include_rule_text=include_rule_text,
+            ),
+            ctx,
+        )
 
     @mcp_obj.tool()
     def list_documents(ctx: Context | None = None) -> Any:
