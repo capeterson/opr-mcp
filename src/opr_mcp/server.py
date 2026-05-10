@@ -8,11 +8,13 @@ transports:
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.resources as resources
 import logging
+import weakref
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from . import db, indexing_status
 from .config import (
@@ -39,19 +41,16 @@ _auth_provider = None
 _DEFAULT_INSTRUCTIONS_RESOURCE = "instructions.md"
 _cached_instructions: str | None = None
 
-# Short pointer advertised on the MCP `initialize` handshake. Many clients do
-# not surface the handshake instructions to the model, and when several MCP
-# servers are loaded simultaneously the per-server text gets crowded out
-# further. We keep this string tiny on purpose and put the real guidance
-# behind the `read_me_first` tool, which is visible in every client's tool
-# catalog.
-_HANDSHAKE_INSTRUCTIONS = (
-    "OPR rules-lookup server. Before answering any question about "
-    "building, editing, or validating an army list, or about upgrade "
-    "point costs, call the `read_me_first` tool for required usage "
-    "guidance (force-organization limits, hero-attachment rules, "
-    "point-cost conventions, recommended workflow)."
-)
+# Sessions that have already received the auto-injected instructions on a
+# prior tool response. Keyed on the live ServerSession object so entries
+# vanish when the session is GC'd — this prevents the set growing without
+# bound on long-running streamable-HTTP servers, and avoids the id() reuse
+# trap a plain set[int] would have.
+_greeted_sessions: weakref.WeakSet[Any] = weakref.WeakSet()
+
+
+def _reset_greeted_sessions_for_tests() -> None:
+    _greeted_sessions.clear()
 
 
 def _db():
@@ -84,36 +83,83 @@ def _load_instructions() -> str:
     return text
 
 
-def _with_status(payload):
-    """Attach an indexing-status block to a tool result when ingest is active.
+def _finalize(payload, ctx: Context | None):
+    """Attach indexing status and (once per session) the full instructions.
 
-    Returns the bare payload when the index is fully built and idle, so
-    clients see the same shape they always have. When indexing is in
-    progress (or hasn't completed an initial pass yet), wrap the payload
-    so the caller sees a ``warning`` and can decide whether to retry.
+    Two sibling fields may be added to a tool's response:
+
+    * ``indexing``: a status block describing in-flight ingest. Returned
+      whenever ``indexing_status.snapshot()`` reports a warning, regardless
+      of session.
+    * ``instructions``: the full ``instructions.md`` body. Attached on the
+      first tool call within a given MCP session and never again for that
+      session. This is how the model receives usage guidance under clients
+      that drop the handshake ``instructions`` field or defer tool-schema
+      loading (in which case the catalog isn't visible up front).
+
+    When neither block applies the bare payload is returned unchanged, so
+    idle responses keep their historical shape (see
+    ``test_with_status_returns_payload_unwrapped_when_idle``).
     """
     snap = indexing_status.snapshot()
     warning = snap.warning()
-    if warning is None:
+    status = None
+    if warning is not None:
+        status = snap.to_dict()
+        status["warning"] = warning
+
+    instructions_text: str | None = None
+    if ctx is not None:
+        try:
+            session = ctx.session
+        except Exception:
+            session = None
+        if session is not None:
+            try:
+                already_greeted = session in _greeted_sessions
+            except TypeError:
+                already_greeted = True  # un-hashable session: skip safely
+            if not already_greeted:
+                # Load before marking so a transient _load_instructions()
+                # failure (e.g. a misconfigured INSTRUCTIONS_FILE) doesn't
+                # consume the one-shot greeting — the next call retries.
+                instructions_text = _load_instructions()
+                with contextlib.suppress(TypeError):
+                    _greeted_sessions.add(session)
+
+    if status is None and instructions_text is None:
         return payload
-    status = snap.to_dict()
-    status["warning"] = warning
+
     if isinstance(payload, list):
-        return {"results": payload, "indexing": status}
-    if isinstance(payload, dict):
-        merged = dict(payload)
-        merged["indexing"] = status
-        return merged
-    if payload is None:
-        return {"result": None, "indexing": status}
-    return {"result": payload, "indexing": status}
+        result: dict = {"results": payload}
+    elif isinstance(payload, dict):
+        result = dict(payload)
+    elif payload is None:
+        result = {"result": None}
+    else:
+        result = {"result": payload}
+
+    if status is not None:
+        result["indexing"] = status
+    if instructions_text is not None:
+        result["instructions"] = instructions_text
+    return result
+
+
+def _with_status(payload):
+    """Backward-compat shim: ``_finalize`` without a Context.
+
+    Tests in ``tests/test_indexing_status.py`` call this directly and don't
+    care about the per-session instructions injection. Keep this around so
+    those callers don't need to know about Context.
+    """
+    return _finalize(payload, None)
 
 
 def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     if with_auth is None:
         return FastMCP(
             "opr",
-            instructions=_HANDSHAKE_INSTRUCTIONS,
             host=http_host(),
             port=http_port(),
         )
@@ -148,7 +194,6 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     )
     return FastMCP(
         "opr",
-        instructions=_HANDSHAKE_INSTRUCTIONS,
         auth_server_provider=_auth_provider,
         auth=auth_settings,
         host=http_host(),
@@ -164,6 +209,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         game_system: str | None = None,
         army: str | None = None,
         version: str | None = None,
+        ctx: Context | None = None,
     ) -> Any:
         """Free-text hybrid search across all ingested OPR rule chunks.
 
@@ -183,16 +229,20 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             version: Optional version pin (e.g. "3.5.3"). When omitted, only
                 the latest version of each (game_system, army) book is searched.
         """
-        return _with_status(search_rules_tool.run(
-            _db(), query, limit=limit, game_system=game_system, army=army,
-            version=version,
-        ))
+        return _finalize(
+            search_rules_tool.run(
+                _db(), query, limit=limit, game_system=game_system, army=army,
+                version=version,
+            ),
+            ctx,
+        )
 
     @mcp_obj.tool()
     def lookup_unit(
         name: str,
         army: str | None = None,
         version: str | None = None,
+        ctx: Context | None = None,
     ) -> Any:
         """Look up an OPR unit by name. Returns structured stats and equipment.
 
@@ -209,8 +259,9 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             version: Optional version pin (e.g. "3.5.3"). When omitted, only the
                 latest army-book version contributes results.
         """
-        return _with_status(
-            lookup_unit_tool.run(_db(), name, army=army, version=version)
+        return _finalize(
+            lookup_unit_tool.run(_db(), name, army=army, version=version),
+            ctx,
         )
 
     @mcp_obj.tool()
@@ -219,6 +270,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         army: str | None = None,
         game_system: str | None = None,
         version: str | None = None,
+        ctx: Context | None = None,
     ) -> Any:
         """Look up structured upgrade options + point costs for a unit.
 
@@ -246,9 +298,12 @@ def _register_tools(mcp_obj: FastMCP) -> None:
                 latest army-book version per (game_system, army) is
                 used.
         """
-        return _with_status(lookup_upgrades_tool.run(
-            _db(), name, army=army, game_system=game_system, version=version,
-        ))
+        return _finalize(
+            lookup_upgrades_tool.run(
+                _db(), name, army=army, game_system=game_system, version=version,
+            ),
+            ctx,
+        )
 
     @mcp_obj.tool()
     def get_special_rule(
@@ -256,6 +311,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         scope: str | None = None,
         game_system: str | None = None,
         version: str | None = None,
+        ctx: Context | None = None,
     ) -> Any:
         """Look up a single special rule by exact name (case-insensitive).
 
@@ -270,17 +326,24 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             version: Optional version pin. When omitted, only the latest version
                 of each (game_system, army) source is searched.
         """
-        return _with_status(get_special_rule_tool.run(
-            _db(), name, scope=scope, game_system=game_system, version=version,
-        ))
+        return _finalize(
+            get_special_rule_tool.run(
+                _db(), name, scope=scope, game_system=game_system, version=version,
+            ),
+            ctx,
+        )
 
     @mcp_obj.tool()
-    def list_armies() -> Any:
+    def list_armies(ctx: Context | None = None) -> Any:
         """List every army present in the index, with document and unit counts."""
-        return _with_status(lists_tool.list_armies(_db()))
+        return _finalize(lists_tool.list_armies(_db()), ctx)
 
     @mcp_obj.tool()
-    def list_units(army: str, version: str | None = None) -> Any:
+    def list_units(
+        army: str,
+        version: str | None = None,
+        ctx: Context | None = None,
+    ) -> Any:
         """List all units for a given army (case-insensitive match on army name).
 
         Args:
@@ -288,15 +351,15 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             version: Optional version pin. When omitted, only units from the
                 latest army-book version are returned.
         """
-        return _with_status(lists_tool.list_units(_db(), army, version=version))
+        return _finalize(lists_tool.list_units(_db(), army, version=version), ctx)
 
     @mcp_obj.tool()
-    def list_documents() -> Any:
+    def list_documents(ctx: Context | None = None) -> Any:
         """List every ingested PDF with its detected metadata."""
-        return _with_status(lists_tool.list_documents(_db()))
+        return _finalize(lists_tool.list_documents(_db()), ctx)
 
     @mcp_obj.tool()
-    def index_status() -> dict[str, Any]:
+    def index_status(ctx: Context | None = None) -> dict[str, Any]:
         """Report whether indexing is currently running.
 
         Use this to check whether ``search_rules`` / ``lookup_unit`` /
@@ -311,24 +374,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         warning = snap.warning()
         if warning is not None:
             out["warning"] = warning
-        return out
-
-    @mcp_obj.tool()
-    def read_me_first() -> str:
-        """READ THIS FIRST when the user asks anything about building, editing,
-        or validating an OPR army list, or about upgrade point costs.
-
-        Returns the server's full usage guidance: force-organization rules
-        that constrain legal lists (Hero caps, duplicate limits), how
-        Hero-attached units count for activation/force-org purposes, which
-        tools to prefer for which questions, and the recommended
-        list-building workflow.
-
-        The MCP handshake also points at this tool. Calling it loads the
-        guidance into context — call it again any time the conversation
-        has drifted and you need to reload the rules. No arguments.
-        """
-        return _load_instructions()
+        return _finalize(out, ctx)
 
 
 def _register_discord_callback(mcp_obj: FastMCP) -> None:
