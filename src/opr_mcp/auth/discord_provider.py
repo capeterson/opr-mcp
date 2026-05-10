@@ -293,7 +293,11 @@ class DiscordOAuthProvider(
         #           forced through a fresh browser auth.
         membership = await self._revalidate_discord_membership(stored.discord_user_id)
         if membership is False:
-            await self._store.revoke_grant(stored.grant_id)
+            # Server-wide policy failure: wipe every grant we've issued to
+            # this Discord user (other clients/sessions can't be trusted
+            # either) and drop the stashed Discord tokens — we shouldn't
+            # be holding credentials for an account we just rejected.
+            await self._store.purge_discord_user(stored.discord_user_id)
             raise TokenError("invalid_grant", "user is no longer a member of the required Discord server")
         # Rotation: the prior refresh token is already gone; also invalidate
         # the access token from the same grant so a single grant never has
@@ -347,9 +351,15 @@ class DiscordOAuthProvider(
         :class:`discord.DiscordError` when Discord itself rejects the refresh.
         """
         # 60s safety buffer so we don't make a call seconds before expiry.
-        if stash.expires_at is None or stash.expires_at - 60 > storage.now():
+        if stash.expires_at is not None and stash.expires_at - 60 > storage.now():
             return stash.access_token
         if stash.refresh_token is None:
+            # Unknown expiry (Discord omitted ``expires_in``) AND no refresh
+            # token to fall back on: best-effort, return what we have. The
+            # guild check might still succeed; if it doesn't, membership
+            # comes back as None and the grant deadline is preserved.
+            if stash.expires_at is None:
+                return stash.access_token
             return None
         async with self._http_factory() as http:
             refreshed = await discord.refresh_access_token(

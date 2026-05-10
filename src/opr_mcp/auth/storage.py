@@ -372,6 +372,26 @@ class AuthStorage:
         self._conn.execute("DELETE FROM oauth_refresh_tokens WHERE grant_id = ?", (grant_id,))
         self._conn.commit()
 
+    async def purge_discord_user(self, discord_user_id: str) -> None:
+        """Wipe every server-issued credential tied to a Discord user.
+
+        Used when we definitively learn the user no longer satisfies the
+        server-wide policy (e.g. they were kicked from the required guild).
+        Kills *all* of their MCP grants — not just the one that triggered
+        the check — and removes the stashed Discord tokens so we aren't
+        retaining credentials for someone we've just rejected.
+        """
+        self._conn.execute(
+            "DELETE FROM oauth_access_tokens WHERE discord_user_id = ?", (discord_user_id,)
+        )
+        self._conn.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE discord_user_id = ?", (discord_user_id,)
+        )
+        self._conn.execute(
+            "DELETE FROM oauth_discord_tokens WHERE discord_user_id = ?", (discord_user_id,)
+        )
+        self._conn.commit()
+
     async def revoke_refresh_token_only(self, token: str) -> None:
         """Remove a single refresh token (used during refresh-rotation, not for revocation)."""
         self._conn.execute("DELETE FROM oauth_refresh_tokens WHERE token_hash = ?", (hash_token(token),))
