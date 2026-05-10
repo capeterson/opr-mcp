@@ -180,6 +180,23 @@ class DiscordOAuthProvider(
                 "Your Discord account is not a member of the required server.",
             )
 
+        # Persist Discord's tokens (Fernet-encrypted) so we can later re-check
+        # guild membership without forcing the user back through the browser.
+        # Discord may omit ``expires_in``; treat that as no known expiry.
+        discord_user_id = str(user["id"])
+        expires_at = (
+            storage.now() + tokens.expires_in if tokens.expires_in is not None else None
+        )
+        await self._store.save_discord_tokens(
+            storage.StoredDiscordTokens(
+                discord_user_id=discord_user_id,
+                access_token=tokens.access_token,
+                refresh_token=tokens.refresh_token,
+                expires_at=expires_at,
+                updated_at=storage.now(),
+            )
+        )
+
         mcp_code = storage.new_token()
         await self._store.save_auth_code(
             storage.StoredAuthCode(
@@ -189,7 +206,7 @@ class DiscordOAuthProvider(
                 redirect_explicit=pending.redirect_explicit,
                 code_challenge=pending.code_challenge,
                 scopes=pending.scopes,
-                discord_user_id=str(user["id"]),
+                discord_user_id=discord_user_id,
                 discord_username=user.get("username"),
                 resource=pending.resource,
                 expires_at=storage.now() + AUTH_CODE_TTL,

@@ -183,6 +183,14 @@ CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON oauth_refresh_tokens(client_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_grant ON oauth_refresh_tokens(grant_id);
+
+CREATE TABLE IF NOT EXISTS oauth_discord_tokens (
+    discord_user_id      TEXT PRIMARY KEY,
+    access_token_enc     BLOB NOT NULL,
+    refresh_token_enc    BLOB,
+    expires_at           INTEGER,
+    updated_at           INTEGER NOT NULL
+);
 """
 
 

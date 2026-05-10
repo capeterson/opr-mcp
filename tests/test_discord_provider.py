@@ -132,6 +132,45 @@ async def test_full_happy_path(provider):
     assert access is not None and access.scopes == ["mcp"]
 
 
+async def test_callback_persists_discord_tokens(provider):
+    """After a successful Discord callback, the user's Discord access + refresh
+    tokens are stashed (encrypted) so we can later re-validate guild membership
+    without forcing a full browser round-trip."""
+    client = await provider.get_client("client-1")
+    discord_url = await provider.authorize(client, _make_params())
+    pending = await provider.take_pending_for_state(_query_param(discord_url, "state"))
+    await provider.complete_discord_callback(pending=pending, code="discord-code")
+
+    stashed = await provider._store.load_discord_tokens("U1")
+    assert stashed is not None
+    assert stashed.access_token == "discord-access"
+    assert stashed.refresh_token == "discord-refresh"
+    assert stashed.expires_at is not None  # came from expires_in=3600
+
+
+async def test_callback_does_not_persist_when_guild_check_fails(tmp_db):
+    """If the user fails the guild check, we must NOT stash their Discord
+    tokens — we shouldn't be holding credentials for users we just rejected."""
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+    cfg = _make_config(guild_id="G1")
+    p = DiscordOAuthProvider(
+        cfg,
+        store,
+        http_client_factory=_httpx_factory(_discord_handler_ok(guild_ids=["G2"])),
+    )
+    await store.save_client(_make_client())
+    client = await store.get_client("client-1")
+    discord_url = await p.authorize(client, _make_params())
+    pending = await p.take_pending_for_state(_query_param(discord_url, "state"))
+
+    with pytest.raises(CallbackError):
+        await p.complete_discord_callback(pending=pending, code="x")
+
+    assert await store.load_discord_tokens("U1") is None
+
+
 async def test_user_not_in_guild_is_access_denied(tmp_db):
     conn = db.open_db(tmp_db)
     db.init_auth_schema(conn)
