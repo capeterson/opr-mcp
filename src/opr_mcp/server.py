@@ -39,6 +39,20 @@ _auth_provider = None
 _DEFAULT_INSTRUCTIONS_RESOURCE = "instructions.md"
 _cached_instructions: str | None = None
 
+# Short pointer advertised on the MCP `initialize` handshake. Many clients do
+# not surface the handshake instructions to the model, and when several MCP
+# servers are loaded simultaneously the per-server text gets crowded out
+# further. We keep this string tiny on purpose and put the real guidance
+# behind the `read_me_first` tool, which is visible in every client's tool
+# catalog.
+_HANDSHAKE_INSTRUCTIONS = (
+    "OPR rules-lookup server. Before answering any question about "
+    "building, editing, or validating an army list, or about upgrade "
+    "point costs, call the `read_me_first` tool for required usage "
+    "guidance (force-organization limits, hero-attachment rules, "
+    "point-cost conventions, recommended workflow)."
+)
+
 
 def _db():
     global _conn
@@ -99,7 +113,7 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     if with_auth is None:
         return FastMCP(
             "opr",
-            instructions=_load_instructions(),
+            instructions=_HANDSHAKE_INSTRUCTIONS,
             host=http_host(),
             port=http_port(),
         )
@@ -134,7 +148,7 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     )
     return FastMCP(
         "opr",
-        instructions=_load_instructions(),
+        instructions=_HANDSHAKE_INSTRUCTIONS,
         auth_server_provider=_auth_provider,
         auth=auth_settings,
         host=http_host(),
@@ -298,6 +312,23 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         if warning is not None:
             out["warning"] = warning
         return out
+
+    @mcp_obj.tool()
+    def read_me_first() -> str:
+        """READ THIS FIRST when the user asks anything about building, editing,
+        or validating an OPR army list, or about upgrade point costs.
+
+        Returns the server's full usage guidance: force-organization rules
+        that constrain legal lists (Hero caps, duplicate limits), how
+        Hero-attached units count for activation/force-org purposes, which
+        tools to prefer for which questions, and the recommended
+        list-building workflow.
+
+        The MCP handshake also points at this tool. Calling it loads the
+        guidance into context — call it again any time the conversation
+        has drifted and you need to reload the rules. No arguments.
+        """
+        return _load_instructions()
 
 
 def _register_discord_callback(mcp_obj: FastMCP) -> None:

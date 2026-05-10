@@ -16,6 +16,14 @@ Unless the user has explicitly said "ignore force org", "narrative
 list", or similar, treat compliance as a hard requirement, and flag
 any user request that would violate a limit.
 
+## Heroes attached to units
+
+When a Hero "joins" or is attached to a non-Hero unit at deployment,
+the combined formation counts as a SINGLE unit and a SINGLE activation
+— NOT two. Do not count an attached Hero as a separate unit or
+separate activation when validating list legality or pacing turn
+order.
+
 ## Point costs — use the structured tool, not free-text search
 
 Point costs for unit upgrades come from the dedicated
