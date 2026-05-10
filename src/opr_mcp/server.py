@@ -120,9 +120,12 @@ def _finalize(payload, ctx: Context | None):
             except TypeError:
                 already_greeted = True  # un-hashable session: skip safely
             if not already_greeted:
+                # Load before marking so a transient _load_instructions()
+                # failure (e.g. a misconfigured INSTRUCTIONS_FILE) doesn't
+                # consume the one-shot greeting — the next call retries.
+                instructions_text = _load_instructions()
                 with contextlib.suppress(TypeError):
                     _greeted_sessions.add(session)
-                instructions_text = _load_instructions()
 
     if status is None and instructions_text is None:
         return payload
@@ -356,7 +359,7 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         return _finalize(lists_tool.list_documents(_db()), ctx)
 
     @mcp_obj.tool()
-    def index_status(ctx: Context | None = None) -> Any:
+    def index_status(ctx: Context | None = None) -> dict[str, Any]:
         """Report whether indexing is currently running.
 
         Use this to check whether ``search_rules`` / ``lookup_unit`` /
