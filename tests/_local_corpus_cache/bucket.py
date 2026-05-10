@@ -57,7 +57,7 @@ def make_buckets(n_buckets: int) -> list[list[Path]]:
     # equal share of every system. Hash-seeded sort gives a stable
     # but unaligned order per-system so adjacent agents don't draw
     # neighboring books in the original directory.
-    for system, files in sorted(by_system.items()):
+    for _system, files in sorted(by_system.items()):
         files.sort(
             key=lambda p: hashlib.blake2b(
                 p.name.encode(), digest_size=8

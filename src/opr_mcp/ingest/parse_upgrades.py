@@ -145,9 +145,7 @@ def _is_terminator(line: str) -> bool:
     s = line.strip()
     if _UNIT_STAT_LINE_RE.match(s):
         return True
-    if _UNIT_NAME_LINE_RE.match(s):
-        return True
-    return False
+    return bool(_UNIT_NAME_LINE_RE.match(s))
 
 
 def _is_skippable_in_option(line: str) -> bool:
@@ -157,9 +155,7 @@ def _is_skippable_in_option(line: str) -> bool:
     if not s:
         return True
     # Bare table-header tokens like ``Weapon`` / ``ATK`` on their own line.
-    if s.lower() in _TABLE_HEADER_WORDS:
-        return True
-    return False
+    return s.lower() in _TABLE_HEADER_WORDS
 
 
 def parse_upgrades(section: Section) -> list[Group]:
