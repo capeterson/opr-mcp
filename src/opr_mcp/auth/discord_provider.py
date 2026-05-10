@@ -180,6 +180,23 @@ class DiscordOAuthProvider(
                 "Your Discord account is not a member of the required server.",
             )
 
+        # Persist Discord's tokens (Fernet-encrypted) so we can later re-check
+        # guild membership without forcing the user back through the browser.
+        # Discord may omit ``expires_in``; treat that as no known expiry.
+        discord_user_id = str(user["id"])
+        expires_at = (
+            storage.now() + tokens.expires_in if tokens.expires_in is not None else None
+        )
+        await self._store.save_discord_tokens(
+            storage.StoredDiscordTokens(
+                discord_user_id=discord_user_id,
+                access_token=tokens.access_token,
+                refresh_token=tokens.refresh_token,
+                expires_at=expires_at,
+                updated_at=storage.now(),
+            )
+        )
+
         mcp_code = storage.new_token()
         await self._store.save_auth_code(
             storage.StoredAuthCode(
@@ -189,7 +206,7 @@ class DiscordOAuthProvider(
                 redirect_explicit=pending.redirect_explicit,
                 code_challenge=pending.code_challenge,
                 scopes=pending.scopes,
-                discord_user_id=str(user["id"]),
+                discord_user_id=discord_user_id,
                 discord_username=user.get("username"),
                 resource=pending.resource,
                 expires_at=storage.now() + AUTH_CODE_TTL,
@@ -265,20 +282,109 @@ class DiscordOAuthProvider(
         new_scopes = scopes if scopes else stored.scopes
         if not set(new_scopes).issubset(set(stored.scopes)):
             raise TokenError("invalid_scope", "requested scopes exceed original grant")
+
+        # Re-check Discord guild membership using the stashed Discord tokens.
+        # - True  → user still belongs; let the grant deadline slide forward
+        #           so well-behaved clients never need to re-auth in a browser.
+        # - False → user was kicked / left; revoke the grant immediately.
+        # - None  → couldn't reach a definitive answer (no stash, network
+        #           error, Discord refresh revoked, ...); preserve the
+        #           original absolute deadline so eventually the user is
+        #           forced through a fresh browser auth.
+        membership = await self._revalidate_discord_membership(stored.discord_user_id)
+        if membership is False:
+            # Server-wide policy failure: wipe every grant we've issued to
+            # this Discord user (other clients/sessions can't be trusted
+            # either) and drop the stashed Discord tokens — we shouldn't
+            # be holding credentials for an account we just rejected.
+            await self._store.purge_discord_user(stored.discord_user_id)
+            raise TokenError("invalid_grant", "user is no longer a member of the required Discord server")
         # Rotation: the prior refresh token is already gone; also invalidate
         # the access token from the same grant so a single grant never has
         # more than one active access/refresh pair.
-        # The new pair preserves the original absolute deadline + resource
-        # binding so the grant cannot be extended indefinitely by chained
-        # refreshes.
         await self._store.revoke_grant(stored.grant_id)
+        # Sliding deadline only when we positively re-validated; otherwise
+        # preserve so an unverifiable user can't extend access indefinitely.
+        refresh_expires_at = None if membership is True else stored.expires_at
         return await self._issue_tokens(
             client_id=stored.client_id,
             discord_user_id=stored.discord_user_id,
             scopes=new_scopes,
             resource=stored.resource,
-            refresh_expires_at=stored.expires_at,
+            refresh_expires_at=refresh_expires_at,
         )
+
+    async def _revalidate_discord_membership(self, discord_user_id: str) -> bool | None:
+        """Re-check guild membership using stashed Discord tokens.
+
+        Returns ``True``/``False`` for a definitive answer, or ``None`` if
+        we couldn't reach Discord (no stash, network error, refresh failed).
+        The caller treats ``None`` as "leave the existing grant deadline
+        alone" — neither extend nor revoke.
+        """
+        stash = await self._store.load_discord_tokens(discord_user_id)
+        if stash is None:
+            return None
+        try:
+            access_token = await self._ensure_fresh_discord_access(stash)
+        except discord.DiscordError as exc:
+            log.warning("Discord token refresh failed for %s: %s", discord_user_id, exc)
+            return None
+        if access_token is None:
+            return None
+        try:
+            async with self._http_factory() as http:
+                return await discord.user_is_in_guild(
+                    http, access_token, self._config.discord_guild_id
+                )
+        except discord.DiscordError as exc:
+            log.warning("Discord guild check failed for %s: %s", discord_user_id, exc)
+            return None
+
+    async def _ensure_fresh_discord_access(
+        self, stash: storage.StoredDiscordTokens
+    ) -> str | None:
+        """Return a usable Discord access token for ``stash``, refreshing if needed.
+
+        Returns ``None`` when we can't get a usable token (no refresh token
+        stashed and the access token is past expiry). Raises
+        :class:`discord.DiscordError` when Discord itself rejects the refresh.
+        """
+        # 60s safety buffer so we don't make a call seconds before expiry.
+        if stash.expires_at is not None and stash.expires_at - 60 > storage.now():
+            return stash.access_token
+        if stash.refresh_token is None:
+            # Unknown expiry (Discord omitted ``expires_in``) AND no refresh
+            # token to fall back on: best-effort, return what we have. The
+            # guild check might still succeed; if it doesn't, membership
+            # comes back as None and the grant deadline is preserved.
+            if stash.expires_at is None:
+                return stash.access_token
+            return None
+        async with self._http_factory() as http:
+            refreshed = await discord.refresh_access_token(
+                http,
+                client_id=self._config.discord_client_id,
+                client_secret=self._config.discord_client_secret,
+                refresh_token=stash.refresh_token,
+            )
+        # Discord rotates refresh tokens; persist whatever came back so the
+        # next refresh has a live token. If Discord omitted ``refresh_token``
+        # (rare for this grant type), keep the existing one.
+        new_refresh = refreshed.refresh_token if refreshed.refresh_token else stash.refresh_token
+        new_expires = (
+            storage.now() + refreshed.expires_in if refreshed.expires_in is not None else None
+        )
+        await self._store.save_discord_tokens(
+            storage.StoredDiscordTokens(
+                discord_user_id=stash.discord_user_id,
+                access_token=refreshed.access_token,
+                refresh_token=new_refresh,
+                expires_at=new_expires,
+                updated_at=storage.now(),
+            )
+        )
+        return refreshed.access_token
 
     # --- access token verification ---
 

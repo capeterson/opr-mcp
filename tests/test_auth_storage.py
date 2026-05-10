@@ -155,6 +155,100 @@ async def test_client_secret_not_persisted_in_plaintext(tmp_db):
     assert loaded is not None and loaded.client_secret == "super-secret-value"
 
 
+async def test_discord_tokens_round_trip(tmp_db):
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+
+    await s.save_discord_tokens(
+        storage.StoredDiscordTokens(
+            discord_user_id="U1",
+            access_token="discord-access",
+            refresh_token="discord-refresh",
+            expires_at=storage.now() + 3600,
+            updated_at=storage.now(),
+        )
+    )
+    loaded = await s.load_discord_tokens("U1")
+    assert loaded is not None
+    assert loaded.access_token == "discord-access"
+    assert loaded.refresh_token == "discord-refresh"
+    assert await s.load_discord_tokens("missing") is None
+
+
+async def test_discord_tokens_overwrite_on_reauth(tmp_db):
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+
+    await s.save_discord_tokens(
+        storage.StoredDiscordTokens(
+            discord_user_id="U1", access_token="a1", refresh_token="r1",
+            expires_at=None, updated_at=storage.now(),
+        )
+    )
+    await s.save_discord_tokens(
+        storage.StoredDiscordTokens(
+            discord_user_id="U1", access_token="a2", refresh_token="r2",
+            expires_at=None, updated_at=storage.now(),
+        )
+    )
+    loaded = await s.load_discord_tokens("U1")
+    assert loaded is not None and loaded.access_token == "a2" and loaded.refresh_token == "r2"
+
+
+async def test_discord_tokens_not_persisted_in_plaintext(tmp_db):
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+
+    await s.save_discord_tokens(
+        storage.StoredDiscordTokens(
+            discord_user_id="U1",
+            access_token="plaintext-discord-access",
+            refresh_token="plaintext-discord-refresh",
+            expires_at=None,
+            updated_at=storage.now(),
+        )
+    )
+    row = conn.execute(
+        "SELECT access_token_enc, refresh_token_enc FROM oauth_discord_tokens WHERE discord_user_id = ?",
+        ("U1",),
+    ).fetchone()
+    assert b"plaintext-discord-access" not in row["access_token_enc"]
+    assert b"plaintext-discord-refresh" not in row["refresh_token_enc"]
+
+
+async def test_discord_tokens_handles_missing_refresh(tmp_db):
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+
+    await s.save_discord_tokens(
+        storage.StoredDiscordTokens(
+            discord_user_id="U1", access_token="a", refresh_token=None,
+            expires_at=None, updated_at=storage.now(),
+        )
+    )
+    loaded = await s.load_discord_tokens("U1")
+    assert loaded is not None and loaded.refresh_token is None
+
+
+async def test_discord_tokens_delete(tmp_db):
+    conn = db.open_db(tmp_db)
+    db.init_auth_schema(conn)
+    s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
+
+    await s.save_discord_tokens(
+        storage.StoredDiscordTokens(
+            discord_user_id="U1", access_token="a", refresh_token="r",
+            expires_at=None, updated_at=storage.now(),
+        )
+    )
+    await s.delete_discord_tokens("U1")
+    assert await s.load_discord_tokens("U1") is None
+
+
 async def test_purge_expired(tmp_db):
     conn = db.open_db(tmp_db)
     db.init_auth_schema(conn)

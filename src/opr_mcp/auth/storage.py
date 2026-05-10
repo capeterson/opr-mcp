@@ -88,6 +88,15 @@ class StoredRefreshToken:
     expires_at: int | None
 
 
+@dataclass
+class StoredDiscordTokens:
+    discord_user_id: str
+    access_token: str
+    refresh_token: str | None
+    expires_at: int | None
+    updated_at: int
+
+
 PENDING_TTL_SECONDS = 600
 
 
@@ -363,9 +372,74 @@ class AuthStorage:
         self._conn.execute("DELETE FROM oauth_refresh_tokens WHERE grant_id = ?", (grant_id,))
         self._conn.commit()
 
+    async def purge_discord_user(self, discord_user_id: str) -> None:
+        """Wipe every server-issued credential tied to a Discord user.
+
+        Used when we definitively learn the user no longer satisfies the
+        server-wide policy (e.g. they were kicked from the required guild).
+        Kills *all* of their MCP grants — not just the one that triggered
+        the check — and removes the stashed Discord tokens so we aren't
+        retaining credentials for someone we've just rejected.
+        """
+        self._conn.execute(
+            "DELETE FROM oauth_access_tokens WHERE discord_user_id = ?", (discord_user_id,)
+        )
+        self._conn.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE discord_user_id = ?", (discord_user_id,)
+        )
+        self._conn.execute(
+            "DELETE FROM oauth_discord_tokens WHERE discord_user_id = ?", (discord_user_id,)
+        )
+        self._conn.commit()
+
     async def revoke_refresh_token_only(self, token: str) -> None:
         """Remove a single refresh token (used during refresh-rotation, not for revocation)."""
         self._conn.execute("DELETE FROM oauth_refresh_tokens WHERE token_hash = ?", (hash_token(token),))
+        self._conn.commit()
+
+    # --- discord tokens (encrypted at rest; one row per discord user) ---
+
+    async def save_discord_tokens(self, t: StoredDiscordTokens) -> None:
+        access_enc = self._cipher.encrypt(t.access_token.encode("utf-8"))
+        refresh_enc = (
+            self._cipher.encrypt(t.refresh_token.encode("utf-8"))
+            if t.refresh_token is not None
+            else None
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO oauth_discord_tokens "
+            "(discord_user_id, access_token_enc, refresh_token_enc, expires_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (t.discord_user_id, access_enc, refresh_enc, t.expires_at, t.updated_at),
+        )
+        self._conn.commit()
+
+    async def load_discord_tokens(self, discord_user_id: str) -> StoredDiscordTokens | None:
+        row = self._conn.execute(
+            "SELECT * FROM oauth_discord_tokens WHERE discord_user_id = ?",
+            (discord_user_id,),
+        ).fetchone()
+        if not row:
+            return None
+        access = self._cipher.decrypt(row["access_token_enc"]).decode("utf-8")
+        refresh = (
+            self._cipher.decrypt(row["refresh_token_enc"]).decode("utf-8")
+            if row["refresh_token_enc"] is not None
+            else None
+        )
+        return StoredDiscordTokens(
+            discord_user_id=row["discord_user_id"],
+            access_token=access,
+            refresh_token=refresh,
+            expires_at=row["expires_at"],
+            updated_at=row["updated_at"],
+        )
+
+    async def delete_discord_tokens(self, discord_user_id: str) -> None:
+        self._conn.execute(
+            "DELETE FROM oauth_discord_tokens WHERE discord_user_id = ?",
+            (discord_user_id,),
+        )
         self._conn.commit()
 
     # --- maintenance ---

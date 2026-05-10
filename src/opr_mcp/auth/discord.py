@@ -70,6 +70,39 @@ async def exchange_code(
     )
 
 
+async def refresh_access_token(
+    client: httpx.AsyncClient,
+    *,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+) -> DiscordTokens:
+    """Use a Discord refresh token to mint a new access (and possibly refresh) token.
+
+    Discord rotates refresh tokens on use, so callers must persist whatever
+    ``refresh_token`` comes back here — the previous one is dead.
+    """
+    resp = await client.post(
+        DISCORD_OAUTH_TOKEN,
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    if resp.status_code != 200:
+        log.warning("Discord token refresh failed: %s %s", resp.status_code, resp.text)
+        raise DiscordError(f"Discord token refresh failed: HTTP {resp.status_code}")
+    payload = resp.json()
+    return DiscordTokens(
+        access_token=payload["access_token"],
+        refresh_token=payload.get("refresh_token"),
+        expires_in=payload.get("expires_in"),
+    )
+
+
 async def fetch_user(client: httpx.AsyncClient, access_token: str) -> dict:
     resp = await client.get(
         DISCORD_API_USER,
