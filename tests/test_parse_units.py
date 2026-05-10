@@ -975,6 +975,34 @@ def test_parse_unit_inline_comma_joined_weapons():
     assert "Tough(3)" in u.rules
 
 
+def test_table_equipment_does_not_leak_from_glued_next_unit():
+    """When a section glues two unit cards together and the FIRST
+    unit has no stat-table equipment but the SECOND unit does, the
+    table extractor must NOT seed the first unit with the second
+    unit's weapons. Regression for Codex P2 review on
+    parse_units.py:490 — the scanner now restricts its header search
+    to the current unit's profile region (bounded by the next
+    unit's name+points or Quality line)."""
+    s = _section(
+        # Unit A — minimal profile, no weapon table extracted.
+        "Pure Stat Hero [1] - 25pts\n"
+        "Quality 3+   Defense 4+\n"
+        "Tough 3\n"
+        # Unit B glued onto the same section, with its own table.
+        "Magma Champion [1] - 50pts\n"
+        "Quality 3+   Defense 5+\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Heavy Hand Weapon\n-\nA3\n1\n-\n",
+        title="Pure Stat Hero",
+    )
+    u = parse_unit(s)
+    assert u is not None
+    # The first unit's row must not pick up Heavy Hand Weapon — that
+    # belongs to Magma Champion.
+    eq_names = [e["name"] for e in u.equipment]
+    assert "Heavy Hand Weapon" not in eq_names, eq_names
+
+
 def test_parse_special_rules_glossary():
     sec = Section(
         section_type="special_rule",

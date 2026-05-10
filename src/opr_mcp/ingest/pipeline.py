@@ -9,6 +9,7 @@ from pathlib import Path
 from .. import embeddings
 from .chunk import Chunk, chunk_blocks
 from .parse_units import equipment_json, parse_special_rules, parse_unit, rules_json
+from .parse_upgrades import parse_upgrades
 from .pdf import detect_metadata, iter_blocks, page_count, sha256_file
 from .segment import Section, segment
 
@@ -23,6 +24,7 @@ class IngestStats:
     units: int = 0
     units_skipped: int = 0
     rules: int = 0
+    upgrades: int = 0
 
 
 def _sections_to_chunks(sections: list[Section]) -> list[Chunk]:
@@ -127,6 +129,7 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
     units_added = 0
     units_skipped = 0
     rules_added = 0
+    upgrades_added = 0
     chunk_id_for_section: dict[int, int] = {}
     chunk_idx = 0
     for sec_i, sec in enumerate(sections):
@@ -143,7 +146,7 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
                 if u is None:
                     units_skipped += 1
                     continue
-                conn.execute(
+                cur = conn.execute(
                     """
                     INSERT INTO units (document_id, chunk_id, army, name, qty, quality, defense,
                                        base_points, equipment_json, rules_json, raw_text)
@@ -164,6 +167,41 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
                     ),
                 )
                 units_added += 1
+                unit_id = cur.lastrowid
+
+                # Structured upgrade options live alongside the unit
+                # profile in the same section. Parse failures here are
+                # logged but don't fail the whole ingest — chunk-level
+                # search still surfaces the upgrade text.
+                try:
+                    groups = parse_upgrades(sec)
+                except Exception as exc:
+                    log.warning(
+                        "Upgrade parse failed for %s in %s: %s",
+                        u.name, path.name, exc,
+                    )
+                    groups = []
+                for gi, group in enumerate(groups):
+                    for oi, opt in enumerate(group.options):
+                        conn.execute(
+                            """
+                            INSERT INTO unit_upgrades (
+                                document_id, unit_id, group_index, group_kind,
+                                option_index, option_text, points_cost, raw_text
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                doc_id,
+                                unit_id,
+                                gi,
+                                group.kind,
+                                oi,
+                                opt.text,
+                                opt.points_cost,
+                                u.raw_text,
+                            ),
+                        )
+                        upgrades_added += 1
             elif sec.section_type == "special_rule":
                 for r in parse_special_rules(sec):
                     conn.execute(
@@ -192,13 +230,15 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
     stats.units += units_added
     stats.units_skipped += units_skipped
     stats.rules += rules_added
+    stats.upgrades += upgrades_added
     log.info(
-        "Ingested %s: %d chunks, %d units (+%d skipped), %d rules",
+        "Ingested %s: %d chunks, %d units (+%d skipped), %d rules, %d upgrade options",
         path.name,
         len(chunks),
         units_added,
         units_skipped,
         rules_added,
+        upgrades_added,
     )
     return stats
 

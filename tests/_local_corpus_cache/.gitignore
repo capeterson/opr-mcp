@@ -1,0 +1,28 @@
+# Everything under this directory is local-only by default — it derives
+# from the user's copyrighted OPR PDF library and must never reach the
+# git remote. Artifacts to keep ignored:
+#
+#   corpus.db / corpus.db-*   — ingested SQLite index of every PDF
+#   manifest.json             — cache-invalidation metadata
+#   ingest.log                — ingest run log
+#   dumps/                    — per-PDF parser output (contains
+#                               unit/equipment/upgrade text from PDFs)
+#   pdf_text/                 — plain-text PDF extracts for agents
+#   agent_briefs/             — pre-sampled claim briefs (also embed
+#                               text from PDFs)
+#   bucket-*.json             — PDF-path partitions used by the
+#                               legacy partitioner
+#
+# What IS tracked: the small Python scripts that build the cache and
+# the validation report explaining what the spot-check pipeline does.
+# These contain no copyrighted text; they only reference the corpus
+# layout.
+
+corpus.db
+corpus.db-*
+manifest.json
+ingest.log
+dumps/
+pdf_text/
+agent_briefs/
+bucket-*.json

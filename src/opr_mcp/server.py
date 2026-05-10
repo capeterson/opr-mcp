@@ -27,6 +27,7 @@ from .config import (
 from .tools import get_special_rule as get_special_rule_tool
 from .tools import lists as lists_tool
 from .tools import lookup_unit as lookup_unit_tool
+from .tools import lookup_upgrades as lookup_upgrades_tool
 from .tools import search_rules as search_rules_tool
 
 log = logging.getLogger(__name__)
@@ -161,8 +162,9 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             query: Natural-language query, e.g. "how does Tough work" or
                 "AP(2) vs Defense 4+".
             limit: Maximum number of results (default 10).
-            game_system: Optional filter, one of "gf" (Grimdark Future), "aof"
-                (Age of Fantasy), "gff" (Firefight), "skirmish", or "core".
+            game_system: Optional filter. Stored values: "aof", "aofr",
+                "aofq", "gf", "gff", "gfsq", "skirmish" (covers both AOF
+                Skirmish and GF Skirmish), "ftl", or "core".
             army: Optional army-name filter (case-sensitive).
             version: Optional version pin (e.g. "3.5.3"). When omitted, only
                 the latest version of each (game_system, army) book is searched.
@@ -192,6 +194,43 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         return _with_status(
             lookup_unit_tool.run(_db(), name, army=army, version=version)
         )
+
+    @mcp_obj.tool()
+    def lookup_upgrades(
+        name: str,
+        army: str | None = None,
+        game_system: str | None = None,
+        version: str | None = None,
+    ) -> Any:
+        """Look up structured upgrade options + point costs for a unit.
+
+        Use this whenever the user asks about the COST of an upgrade
+        (e.g. "how much for a Halberd on a Volcanic Leader"). Do not
+        use ``search_rules`` for cost questions — search returns raw
+        chunks of upgrade-table text where option↔cost pairing is
+        unreliable, and point costs differ between game systems for the
+        same unit.
+
+        Args:
+            name: Unit name (or substring). Case-insensitive.
+            army: Optional army filter to disambiguate.
+            game_system: Optional game-system filter. Stored values
+                are ``"aof"`` (Age of Fantasy), ``"aofr"`` (Regiments),
+                ``"aofq"`` (Quest, also covers AOFQAI), ``"gf"`` (Grimdark
+                Future), ``"gff"`` (Firefight), ``"gfsq"`` (Grimdark
+                Future Quest, also covers GFSQAI), ``"skirmish"``
+                (covers BOTH AOF Skirmish and GF Skirmish — the banner
+                map collapses ``AOFS`` and ``GFS`` to a single value),
+                ``"ftl"`` (Warfleets FTL), and ``"core"`` (core
+                rulebooks). Strongly recommended for any cost question
+                — point scales differ across game systems.
+            version: Optional version pin. When omitted, only the
+                latest army-book version per (game_system, army) is
+                used.
+        """
+        return _with_status(lookup_upgrades_tool.run(
+            _db(), name, army=army, game_system=game_system, version=version,
+        ))
 
     @mcp_obj.tool()
     def get_special_rule(
