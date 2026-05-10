@@ -261,20 +261,30 @@ def _strip_inprofile_heading(line: str) -> tuple[str | None, str]:
 # 1. Inline (army books, some core sections):
 #       "Furious - When charging..."
 #       "Bestial Boost: If this model has Bestial..."
+#       "Counter-Attack: When this unit is charged..."  <- hyphenated names
+#
+# The separator must be ``:`` OR a space-padded dash (`` - `` / `` – ``).
+# A BARE hyphen between two TitleCase tokens (e.g. inside ``Counter-Attack``)
+# stays part of the name. Without this, the non-greedy name matcher would
+# truncate ``Counter-Attack`` at the first hyphen and the rule would be
+# silently indexed as ``Counter`` — making ``get_special_rule("Counter-Attack")``
+# unreachable.
 _RULE_ENTRY_RE = re.compile(
-    r"^(?P<name>[A-Z][A-Za-z' \-]+?)(?P<param>\s*\([^)]+\))?\s*[\:\-–]\s*(?P<desc>.+)$"
+    r"^(?P<name>[A-Z][A-Za-z'\- ]+?)(?P<param>\s*\([^)]+\))?\s*(?::|\s[-–]\s)\s*(?P<desc>.+)$"
 )
 #
-# 2. Paragraph-block (Grimdark Future / Age of Fantasy advanced rules):
+# 2. Paragraph-block (Grimdark Future / Age of Fantasy advanced rulebooks):
 #       "Furious"             <- bare name on its own paragraph
 #       ""
 #       "When charging, ..."  <- description paragraph
 #
-# Real rules use Title Case ("Furious", "Bestial Boost"). ALL-CAPS strings
-# like "ASSAULT" or "ARCANE ITEMS" are section headers and must not be
-# captured as rules — we filter those in :func:`_looks_like_rule_name`.
+# Real rules use Title Case ("Furious", "Bestial Boost", "Magic Skitter-Step").
+# ALL-CAPS strings like "ASSAULT" or "ARCANE ITEMS" are section headers and
+# must not be captured as rules — we filter those in :func:`_looks_like_rule_name`.
+# Hyphens are allowed in the name char class so hyphenated spells / rules
+# (``Magic Skitter-Step``, ``God-Mother's Frenzy``) parse intact.
 _BARE_NAME_RE = re.compile(
-    r"^(?P<name>[A-Z][A-Za-z' ]{2,29})(?P<param>\s*\([^)]{1,10}\))?\s*$"
+    r"^(?P<name>[A-Z][A-Za-z'\- ]{2,29})(?P<param>\s*\([^)]{1,10}\))?\s*$"
 )
 
 
@@ -454,7 +464,20 @@ _STAT_TABLE_ATK_RE = re.compile(r"^A\d+x?$", re.IGNORECASE)
 _STAT_TABLE_QUALITY_RE = re.compile(r"^\s*(?:Q|Quality)\s+\d\+", re.IGNORECASE)
 
 
-def _extract_table_equipment(text: str) -> list[dict]:
+# Sub-headings that can appear BETWEEN rows inside the same five-column
+# table (e.g. ``Upgrade SPE`` introducing a non-weapon row block on a
+# vehicle card). When the scanner sees one of these as the next ``name``
+# cell it skips just that single line and resumes reading 5-cell rows.
+#
+# Bare ``Upgrade`` is deliberately NOT included — that's a real profile
+# boundary (the heading of an upgrade-options block, caught by
+# ``_is_profile_boundary`` via the ``_UPGRADE_ANCHOR_RE`` match). Treating
+# it as a subheading would let the scanner roll past the boundary and
+# emit upgrade-option weapons as base equipment.
+_TABLE_SUBHEADING_RE = re.compile(r"^upgrade\s+spe$", re.IGNORECASE)
+
+
+def _extract_table_equipment(text: str) -> tuple[list[dict], list[str], set[int]]:
     """Pull base-equipment rows from the OPR stat-table column layout.
 
     OPR unit cards render base weapons as a table with five columns
@@ -476,17 +499,33 @@ def _extract_table_equipment(text: str) -> list[dict]:
 
     We scan for the ``Weapon`` ``RNG`` ``ATK`` ``AP`` ``SPE`` sequence
     and read groups of five lines as rows until a non-row line appears
-    (an upgrade-section anchor, an empty stretch, or anything whose
-    third line doesn't look like an attacks marker).
+    (an upgrade-section anchor, an empty stretch, or a row whose shape
+    matches neither the weapon form (``A<n>`` in ATK) nor the
+    non-weapon form (all dashes except SPE)).
 
-    Returns equipment dicts in the same shape as the inline path:
-    ``{"name": "Heavy Hand Weapon", "details": "A3, AP(1)"}``. The
-    ``details`` string omits ``-`` placeholders and wraps a bare AP
-    value as ``AP(N)`` to stay consistent with rule-text expectations
-    elsewhere.
+    Returns ``(equipment, rules_from_gear, consumed_indices)``:
+
+    - ``equipment`` — dicts shaped like ``{"name": "...", "details": "..."}``.
+    - ``rules_from_gear`` — rule tokens parsed out of non-weapon rows' SPE
+      cells (e.g. ``Impact(3)`` for a ``Heavy Wheels`` row). Weapon-row SPE
+      tokens stay attached to the weapon's ``details`` and are NOT promoted
+      to unit rules, since those are weapon-specific.
+    - ``consumed_indices`` — line indices (into the ORIGINAL ``text.splitlines()``
+      indexing, preserving empty lines) covering the header row AND every
+      emitted data row. The caller skips these indices during its own
+      forward scan so SPE-cell tokens never get double-counted as bare
+      rule lines.
     """
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    raw_lines = text.splitlines()
+    # Filtered non-empty lines, with a parallel array of their original
+    # indices so the caller can dedupe against the raw split.
+    lines_with_idx = [
+        (i, ln.strip()) for i, ln in enumerate(raw_lines) if ln.strip()
+    ]
+    lines = [t for _, t in lines_with_idx]
+    orig_idx = [i for i, _ in lines_with_idx]
     n = len(lines)
+
     # Bound the search to the FIRST unit's profile region. If PyMuPDF
     # glued two cards together, the second unit's name+points line or
     # Quality line marks the boundary — anything past it belongs to
@@ -510,16 +549,32 @@ def _extract_table_equipment(text: str) -> list[dict]:
 
     # Find the column header within the window only.
     start = -1
+    header_at = -1
     for i in range(end_window - 4):
         if tuple(lines[i + j].lower() for j in range(5)) == _STAT_TABLE_HEADER:
             start = i + 5
+            header_at = i
             break
     if start < 0:
-        return []
+        return [], [], set()
+
+    consumed: set[int] = set()
+    # Header cells themselves are consumed so the caller's scan skips them.
+    for j in range(5):
+        consumed.add(orig_idx[header_at + j])
 
     out: list[dict] = []
+    rules_from_gear: list[str] = []
     i = start
     while i + 4 < end_window:
+        # Optional in-table sub-heading (``Upgrade SPE``) on its own
+        # line. Skip just that line and resume reading 5-cell rows
+        # from the next position.
+        if _TABLE_SUBHEADING_RE.match(lines[i]):
+            consumed.add(orig_idx[i])
+            i += 1
+            continue
+
         row = lines[i : i + 5]
         name, rng, atk, ap, spe = row
         # Hard stop on a profile boundary that crept into the table —
@@ -528,32 +583,70 @@ def _extract_table_equipment(text: str) -> list[dict]:
         # is done.
         if _is_profile_boundary(name):
             break
-        # Guard: the ATK column must look like ``A<n>``. If it
-        # doesn't, the rows are no longer aligned (PyMuPDF has slipped
-        # in a non-table line) and we must not continue or we'll start
-        # emitting garbage.
-        if not _STAT_TABLE_ATK_RE.match(atk):
-            break
         # Reject if the name field looks like an obvious non-weapon
         # (a dash, a number, or any of the column-header words).
         if name == "-" or name.lower() in _STAT_TABLE_HEADER:
             break
 
-        details: list[str] = []
-        if rng and rng != "-":
-            details.append(rng)
-        details.append(atk)
-        if ap and ap != "-":
-            # Bare numeric AP wraps to ``AP(N)`` for consistency with
-            # the inline-form output (which already includes the
-            # ``AP(N)`` literal).
-            details.append(f"AP({ap})" if ap.isdigit() else ap)
-        if spe and spe != "-":
-            details.append(spe)
-        out.append({"name": name, "details": ", ".join(details)})
+        is_weapon = bool(_STAT_TABLE_ATK_RE.match(atk))
+        # Non-weapon equipment row: a name with no attack marker, no
+        # range, no AP — just a SPE cell carrying one or more rules.
+        # This is how vehicle and mount cards render items like
+        # ``Heavy Wheels | - | - | - | Impact(3)`` or
+        # ``Mount | - | - | - | Fast``.
+        #
+        # The SPE cell is accepted in three shapes:
+        #
+        # 1. Parametric or multi-token list (``Impact(3)``, ``Reliable,
+        #    Takedown``): :func:`_parse_paren_line` returns a non-None
+        #    result.
+        # 2. A single bare TitleCase rule name (``Fast``): rejected by
+        #    ``_parse_paren_line`` (it demands ≥2 bare tokens or a paren
+        #    item), so we test it directly via :data:`_RULE_TOKEN_RE` +
+        #    :func:`_looks_like_rule_name`. Without this branch the row
+        #    is unconsumed and the inline scanner downstream picks up
+        #    ``Mount`` / ``Fast`` and any subsequent weapon names as
+        #    bare unit rules, dropping the rest of the table from
+        #    equipment.
+        spe_rule_tokens: list[str] | None = None
+        if not is_weapon and rng in ("-", "—", "") and atk in ("-", "—", "") \
+                and ap in ("-", "—", "") and spe and spe != "-":
+            parsed = _parse_paren_line(spe)
+            if parsed is not None:
+                _, spe_rule_tokens = parsed
+            elif _RULE_TOKEN_RE.match(spe) and _looks_like_rule_name(spe):
+                spe_rule_tokens = [spe]
+        is_non_weapon = spe_rule_tokens is not None
+        if not is_weapon and not is_non_weapon:
+            break
+
+        if is_weapon:
+            details: list[str] = []
+            if rng and rng != "-":
+                details.append(rng)
+            details.append(atk)
+            if ap and ap != "-":
+                # Bare numeric AP wraps to ``AP(N)`` for consistency with
+                # the inline-form output (which already includes the
+                # ``AP(N)`` literal).
+                details.append(f"AP({ap})" if ap.isdigit() else ap)
+            if spe and spe != "-":
+                details.append(spe)
+            out.append({"name": name, "details": ", ".join(details)})
+        else:
+            # Non-weapon: details = SPE content verbatim, and promote the
+            # parsed rule token(s) to the unit's rule list (this matches
+            # the existing inline-scanner behaviour where the SPE paren
+            # item alone ended up in unit rules).
+            out.append({"name": name, "details": spe})
+            assert spe_rule_tokens is not None  # narrowed via is_non_weapon
+            rules_from_gear.extend(spe_rule_tokens)
+
+        for j in range(5):
+            consumed.add(orig_idx[i + j])
         i += 5
 
-    return out
+    return out, rules_from_gear, consumed
 
 
 def _line_anchors_stat_block(line: str) -> bool:
@@ -620,9 +713,48 @@ def _looks_like_rule_name(name: str) -> bool:
     if len(bare) < 2:
         return False
     return not (len(bare) > 3 and bare.upper() == bare and any(c.isalpha() for c in bare))
+# The set of glossary-banner heading names used both as
+# whole-line / whole-paragraph separators (``_SKIP_PARA_RE``) and as
+# prefixes that may be glued onto the first entry below them
+# (``_GLUED_BANNER_RE``).
+#
+# Two flavours per heading: ALL-CAPS (the literal PDF rendering) and
+# Title Case (some books normalise capitalisation on extraction).
+_BANNER_HEADINGS = (
+    "SPECIAL RULES", "Special Rules",
+    "AURA SPECIAL RULES", "Aura Special Rules",
+    "ARMY SPELLS", "Army Spells",
+    "SPELL LIST", "Spell List",
+)
+# Headings whose presence (whole-line OR glued prefix) switches the
+# parser into "spell mode" — every entry parsed after one of these
+# banners gets ``parametric=False`` regardless of trailing ``(N)``,
+# which in spell context is the casting cost, not a parametric arg.
+_SPELL_MODE_HEADINGS = {"ARMY SPELLS", "Army Spells", "SPELL LIST", "Spell List"}
+
 # Lines/paragraphs to ignore when scanning glossary blocks: section headers,
-# bare page numbers, the literal "SPECIAL RULES" banner.
-_SKIP_PARA_RE = re.compile(r"^(?:\d+|SPECIAL RULES|Special Rules)\s*$")
+# bare page numbers, and the literal sub-section banners that appear
+# between rule blocks inside a single ``special_rule`` section. Without
+# this filter the trailing banner gets glued onto the previous rule's
+# description (the "Vanguard / Stealth Aura trailing-bleed" bug).
+_SKIP_PARA_RE = re.compile(
+    r"^(?:\d+|"
+    + "|".join(re.escape(h) for h in _BANNER_HEADINGS)
+    + r")\s*$"
+)
+# Glued-prefix variant: matches a banner heading at the START of a line,
+# followed by a separator (``:`` or whitespace), and captures the
+# remainder. ``segment()`` opens a ``special_rule`` section whenever a
+# block STARTS with one of these banners, but for glued shapes like
+# ``Army Spells: Heavenly Strike (1): ...`` the heading sits on the
+# same physical line as the first entry. Without stripping the prefix,
+# the line parses as a single rule named ``Army Spells`` rather than
+# the first real entry.
+_GLUED_BANNER_RE = re.compile(
+    r"^(?P<banner>"
+    + "|".join(re.escape(h) for h in _BANNER_HEADINGS)
+    + r")\s*[:\-–]?\s+(?P<rest>\S.*)$"
+)
 # Minimum description length to count as a real rule. Filters garbage like
 # "Tough(12)" or "Missions" that incidentally match the inline pattern.
 _MIN_DESC_LEN = 20
@@ -716,7 +848,8 @@ def parse_unit(section: Section) -> ParsedUnit | None:
     # inline-form scan below dedupe and add anything else (defensive
     # gear like ``Combat Shield (Shield Wall)`` listed alongside a
     # weapon, etc.).
-    for it in _extract_table_equipment(text):
+    table_eq, table_rules, consumed_indices = _extract_table_equipment(text)
+    for it in table_eq:
         key = (it["name"].lower(), it["details"].lower())
         if key in seen_equipment:
             continue
@@ -732,7 +865,12 @@ def parse_unit(section: Section) -> ParsedUnit | None:
     # ``Hero`` before the equipment list are accepted on the second pass —
     # otherwise they'd be lost because they appear before any line that
     # would have set ``in_stat_block`` in a strictly forward scan.
-    in_stat_block = _detect_stat_anchor(text)
+    # A successful table-form extraction is itself a definitive stat-block
+    # signal — table-form weapons don't trip ``_detect_stat_anchor`` (it
+    # only looks at inline ``Name(body)`` forms), so units whose ONLY
+    # weapons are table-form would never anchor and lose lone bare-rule
+    # lines like ``Scurry``.
+    in_stat_block = _detect_stat_anchor(text) or bool(table_eq)
 
     def _add_rule(tok: str) -> None:
         tok = tok.strip()
@@ -751,12 +889,42 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         seen_equipment.add(key)
         equipment.append(it)
 
+    # Rule tokens parsed from the SPE column of non-weapon table rows
+    # (e.g. ``Impact(3)`` for a ``Heavy Wheels`` row). Promoted to unit
+    # rules because they describe the model itself, not the weapon
+    # profile. Weapon-row SPE tokens (``Reliable``, ``Blast(3)``) are
+    # deliberately left attached to ``equipment[i].details``.
+    for r in table_rules:
+        _add_rule(r)
+
+    # First line consumed by the table extractor — used to relax the
+    # ``past_stats_line`` gate below. PyMuPDF doesn't guarantee that the
+    # Q/D line appears before the weapon table; some books emit the
+    # table first. Once a line index is past the table's start, the
+    # parser is unambiguously inside the unit's profile region and lone
+    # bare rules (``Scurry``) can be captured even if Q/D hasn't been
+    # iterated yet. Pre-table flavor lines (``Veteran Warriors``) sit
+    # at indices below the table start and are still gated out.
+    min_consumed_idx = min(consumed_indices) if consumed_indices else None
+
     past_stats_line = False
     in_rules_zone = False
-    for line in text.splitlines():
+    for line_idx, line in enumerate(text.splitlines()):
+        # Lines that the table extractor already consumed (column header,
+        # weapon and non-weapon row cells) MUST be skipped here, or the
+        # SPE-cell content ("Reliable, Takedown" for a Sniper Rifle row)
+        # gets re-parsed as a bare-rule line and pollutes unit rules.
+        if line_idx in consumed_indices:
+            continue
         s = line.strip()
         if not s:
             continue
+
+        # Treat a position past the table-form weapon block as being
+        # inside the stat block too — see ``min_consumed_idx`` above.
+        past_table = (
+            min_consumed_idx is not None and line_idx > min_consumed_idx
+        )
 
         # Hard boundary: an upgrade table, ``Army Special Rules`` block, spell
         # list, etc. that PDF extraction has glued onto this unit's section.
@@ -855,8 +1023,12 @@ def parse_unit(section: Section) -> ParsedUnit | None:
         # so pre-profile flavor text never leaks into rules_json. The
         # in_rules_zone exemption lets a ``Rules:`` / ``Special Rules``
         # heading already in effect process bare-token follow-ups (lone
-        # ``Hero``) even before the Q/D row.
-        if not past_stats_line and not in_rules_zone:
+        # ``Hero``) even before the Q/D row. The ``past_table`` exemption
+        # covers PDFs where PyMuPDF emits the weapon table BEFORE the
+        # Q/D line — a lone ``Scurry`` between the table and Q/D would
+        # otherwise be dropped even though the table-form weapons
+        # already prove we're inside the unit's profile.
+        if not past_stats_line and not in_rules_zone and not past_table:
             continue
 
         # Stat-table column header (``Weapon Range Attacks AP Special``).
@@ -924,12 +1096,41 @@ def parse_special_rules(section: Section) -> list[ParsedRule]:
     - Paragraph block: bare name on its own paragraph, blank line, description
       paragraph (GF/AoF advanced rulebooks)
 
-    Garbage filter: drops entries whose collected description is shorter than
-    :data:`_MIN_DESC_LEN`, which keeps incidental matches like "Tough(12)"
-    appearing in a mission table from polluting the glossary.
+    Spell mode (``parametric=False`` for every entry) is enabled when:
+
+    1. The section title is one of the spell-section names
+       (``Army Spells``, ``Spell List``), or
+    2. The parser encounters an ``ARMY SPELLS`` / ``SPELL LIST`` banner
+       mid-stream — either on its own line/paragraph, or glued as a
+       prefix on the first entry's line.
+
+    The mid-stream toggle covers PDFs where extraction keeps the banner
+    in the same ``PageBlock`` (and therefore the same ``Special Rules``
+    section) as the preceding glossary. Without it, the entries below
+    the banner would still be flagged ``parametric=True`` because the
+    flag is fixed from the original section title.
+
+    Garbage filter: drops entries whose collected description is shorter
+    than :data:`_MIN_DESC_LEN`, which keeps incidental matches like
+    "Tough(12)" appearing in a mission table from polluting the glossary.
     """
+    initial_spell_section = (section.title or "").lower() in {
+        "army spells", "spell list"
+    }
+
     out: list[ParsedRule] = []
     seen: set[tuple[str, str]] = set()  # (name_lower, desc_first40) for dedup
+
+    # Mutable state that crosses paragraph/line boundaries within a
+    # single section. ``spell_mode`` flips ON when a spell banner is
+    # encountered and STAYS on for the remainder of the section
+    # (banners only transition INTO spell sections, never out — the
+    # glossary doesn't reopen mid-section).
+    state = {"spell_mode": initial_spell_section}
+
+    def maybe_enter_spell_mode(banner: str) -> None:
+        if banner in _SPELL_MODE_HEADINGS:
+            state["spell_mode"] = True
 
     def push(name: str | None, parametric: bool, buf: list[str]) -> None:
         if name is None or not buf:
@@ -941,18 +1142,78 @@ def parse_special_rules(section: Section) -> list[ParsedRule]:
         if key in seen:
             return
         seen.add(key)
-        out.append(ParsedRule(name=name, parametric=parametric, description=desc))
+        # In spell sections the trailing ``(N)`` is always a casting cost.
+        effective_parametric = False if state["spell_mode"] else parametric
+        out.append(ParsedRule(name=name, parametric=effective_parametric, description=desc))
 
     cur_name: str | None = None
     cur_param = False
     cur_buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal cur_name, cur_param, cur_buf
+        push(cur_name, cur_param, cur_buf)
+        cur_name = None
+        cur_param = False
+        cur_buf = []
+
+    def process_line(s: str) -> None:
+        """Process a single line of glossary content.
+
+        Strips any glued banner prefix (``Army Spells: Heavenly Strike (1):
+        ...``) into a flush + remainder, since ``segment()`` matches
+        section banners by PREFIX but leaves the rest of the line in the
+        block text. Without this, the leading banner would be indexed as
+        a bogus rule named after itself with the first real entry's
+        description.
+        """
+        nonlocal cur_name, cur_param, cur_buf
+        # Banner-only line: flush current entry and reset.
+        if _SKIP_PARA_RE.match(s):
+            flush()
+            # The line itself IS a banner — pick up its spell-mode hint.
+            maybe_enter_spell_mode(s.strip())
+            return
+        # Glued-banner-prefix line: ``Army Spells: Heavenly Strike (1): ...``
+        # — strip the banner, flush, then reprocess the remainder. The
+        # recursion is bounded because the remainder no longer matches
+        # the leading-banner regex.
+        gm = _GLUED_BANNER_RE.match(s)
+        if gm:
+            flush()
+            maybe_enter_spell_mode(gm.group("banner"))
+            process_line(gm.group("rest"))
+            return
+
+        m = _RULE_ENTRY_RE.match(s)
+        if m and m.group("desc") and _looks_like_rule_name(m.group("name")):
+            flush()
+            cur_name = m.group("name").strip()
+            cur_param = m.group("param") is not None
+            cur_buf = [m.group("desc").strip()]
+        elif cur_name is not None:
+            cur_buf.append(s)
 
     for b in section.blocks:
         # Paragraph-level scan first: split on blank lines.
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", b.text) if p.strip()]
         for para in paragraphs:
             if _SKIP_PARA_RE.match(para):
+                # A banner like ``ARMY SPELLS`` between two entries acts
+                # as a separator — flush the current entry so the banner
+                # text never glues onto its description, and switch the
+                # parser into spell mode if applicable.
+                flush()
+                maybe_enter_spell_mode(para.strip())
                 continue
+
+            # Glued banner at the start of a paragraph: ``Army Spells:
+            # Heavenly Strike (1): Target enemy unit ...``.
+            gm = _GLUED_BANNER_RE.match(para) if "\n" not in para else None
+            if gm:
+                flush()
+                maybe_enter_spell_mode(gm.group("banner"))
+                para = gm.group("rest")
 
             # If paragraph is a single line, it might be a bare-name header for
             # the paragraph-block format.
@@ -961,7 +1222,7 @@ def parse_special_rules(section: Section) -> list[ParsedRule]:
                 bm = _BARE_NAME_RE.match(para)
                 if bm and not _RULE_ENTRY_RE.match(para) and _looks_like_rule_name(bm.group("name")):
                     # Start a new rule; description comes from the *next* paragraph.
-                    push(cur_name, cur_param, cur_buf)
+                    flush()
                     cur_name = bm.group("name").strip()
                     cur_param = bm.group("param") is not None
                     cur_buf = []
@@ -969,7 +1230,7 @@ def parse_special_rules(section: Section) -> list[ParsedRule]:
 
                 im = _RULE_ENTRY_RE.match(para)
                 if im and im.group("desc") and _looks_like_rule_name(im.group("name")):
-                    push(cur_name, cur_param, cur_buf)
+                    flush()
                     cur_name = im.group("name").strip()
                     cur_param = im.group("param") is not None
                     cur_buf = [im.group("desc").strip()]
@@ -987,16 +1248,9 @@ def parse_special_rules(section: Section) -> list[ParsedRule]:
                 s = raw.strip()
                 if not s:
                     continue
-                m = _RULE_ENTRY_RE.match(s)
-                if m and m.group("desc") and _looks_like_rule_name(m.group("name")):
-                    push(cur_name, cur_param, cur_buf)
-                    cur_name = m.group("name").strip()
-                    cur_param = m.group("param") is not None
-                    cur_buf = [m.group("desc").strip()]
-                elif cur_name is not None:
-                    cur_buf.append(s)
+                process_line(s)
 
-    push(cur_name, cur_param, cur_buf)
+    flush()
     return out
 
 
