@@ -74,12 +74,24 @@ def _classify_non_unit(text: str) -> tuple[str, str | None] | None:
     Unit detection is handled inline in ``segment`` because it needs
     cross-block state (a name-line block followed by a Q/D-only block
     must merge into one unit, not two).
+
+    All of the special-rule-glossary variants (``Special Rules``,
+    ``Aura Special Rules``, ``Army Spells``, ``Spell List``,
+    ``Army-Wide Special Rule``) open a ``special_rule`` section but
+    carry distinct titles so downstream code can tell glossary rules
+    apart from spells. In particular, spell entries must not be
+    flagged ``parametric=True`` just because their casting cost is
+    rendered as ``(N)``.
     """
     stripped = text.strip()
     first_line = stripped.splitlines()[0].strip() if stripped else ""
     low = first_line.lower()
     if low in _CORE_HEADERS:
         return ("core_rule", first_line)
+    if low.startswith("aura special rules"):
+        return ("special_rule", "Aura Special Rules")
+    if low.startswith("army spells") or low.startswith("spell list"):
+        return ("special_rule", "Army Spells")
     # Both "SPECIAL RULES" (army-book glossary) and "ARMY-WIDE SPECIAL RULE"
     # (the per-faction always-on rule) feed the special_rules table.
     if low.startswith("special rules") or "army-wide special rule" in low:

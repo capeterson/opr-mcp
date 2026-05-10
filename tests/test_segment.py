@@ -74,3 +74,35 @@ def test_name_only_block_followed_by_qd_block_still_glues():
     assert units[0].title == "Volcanic Leader"
     # Both blocks land in this single section.
     assert len(units[0].blocks) == 2
+
+
+def test_segment_recognises_army_spells_heading():
+    """``Army Spells`` heading opens its own ``special_rule`` section with
+    a distinctive title so downstream parsing can suppress the
+    ``parametric`` flag (a spell's ``(N)`` is a casting cost, not a
+    parametric argument)."""
+    blocks = [
+        _b(1, "Special Rules"),
+        _b(1, "Vanguard - This unit may move 6\" in any direction."),
+        _b(1, "Army Spells"),
+        _b(1, "Heavenly Strike (1): Target enemy unit takes 4 hits."),
+    ]
+    sections = segment(blocks)
+    titles = [s.title for s in sections if s.section_type == "special_rule"]
+    assert "Special Rules" in titles
+    assert "Army Spells" in titles
+
+
+def test_segment_recognises_aura_special_rules_heading():
+    """``Aura Special Rules`` heading opens its own ``special_rule``
+    section so banner lines don't bleed into the previous block's
+    description."""
+    blocks = [
+        _b(1, "Special Rules"),
+        _b(1, "Vanguard - This unit may move 6\" in any direction."),
+        _b(1, "Aura Special Rules"),
+        _b(1, "Stealth Aura - This model and its unit get Stealth."),
+    ]
+    sections = segment(blocks)
+    titles = [s.title for s in sections if s.section_type == "special_rule"]
+    assert "Aura Special Rules" in titles

@@ -1020,3 +1020,208 @@ def test_parse_special_rules_glossary():
     assert tough.parametric is True
     fur = next(r for r in rules if r.name == "Furious")
     assert fur.parametric is False
+
+
+# --- Fixes for Ratmen v3.5.3 audit -----------------------------------------
+#
+# These tests cover the six root causes identified by a unit-by-unit
+# diff of the Ratmen v3.5.3 PDF against the structured MCP responses:
+# weapon-SPE leakage into unit rules, missing lone unit rules
+# (``Scurry``), missing non-weapon equipment (``Heavy Wheels``),
+# hyphen-eating glossary regex, spell casting cost mis-flagged as
+# parametric, and section-banner bleed into descriptions.
+
+
+def test_parse_unit_table_form_lone_rule_captured():
+    """A table-form unit whose only special rule is a lone bare line
+    (``Scurry``) must capture it. Before the fix, ``in_stat_block`` was
+    only set by INLINE weapons, so lone rules on cards that used the
+    five-column table form (the standard layout in every modern OPR army
+    book) were silently dropped — the Militia / Warriors bug."""
+    s = _section(
+        "Militia [10] - 60pts\n"
+        "Quality 5+   Defense 5+\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Hand Weapon\n-\nA1\n-\n-\n"
+        "Scurry\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Scurry" in u.rules, u.rules
+
+
+def test_parse_unit_table_form_weapon_spe_does_not_leak_to_rules():
+    """Weapon SPE-column tokens (``Reliable``, ``Takedown``) stay attached
+    to the weapon's ``details`` and must NOT pollute the unit's rules
+    array — the Sniper / Grenadier / Storm Ogres bug. The unit-level
+    rule (``Scurry``) on its own line still gets captured."""
+    s = _section(
+        "Snipers [5] - 110pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Sniper Rifle\n30\"\nA1\n1\nReliable, Takedown\n"
+        "Scurry\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    rule_set = set(u.rules)
+    # Unit-level rule preserved.
+    assert "Scurry" in rule_set, u.rules
+    # Weapon-level SPE tokens must NOT leak into unit rules.
+    assert "Reliable" not in rule_set, u.rules
+    assert "Takedown" not in rule_set, u.rules
+    # SPE content is still attached to the weapon's details.
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Sniper Rifle" in eq_names, eq_names
+    sr = next(e for e in u.equipment if e["name"] == "Sniper Rifle")
+    assert "Reliable" in sr["details"]
+    assert "Takedown" in sr["details"]
+
+
+def test_parse_unit_table_form_non_weapon_row_captured():
+    """A non-weapon table row (vehicle card with ``Heavy Wheels`` granting
+    ``Impact(3)``) must register as named equipment AND promote the
+    parametric rule into the unit's rules list — the Great Death Roller
+    bug. The PDF lays this out as a row with ``-`` in RNG/ATK/AP and
+    the rule in the SPE cell."""
+    s = _section(
+        "Great Death Roller [1] - 250pts\n"
+        "Quality 4+   Defense 2+\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Twin Gatling Guns\n24\"\nA12\n1\n-\n"
+        "Heavy Wheels\n-\n-\n-\nImpact(3)\n"
+        "Tough(18)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert "Twin Gatling Guns" in eq_names, eq_names
+    assert "Heavy Wheels" in eq_names, eq_names
+    rule_set = set(u.rules)
+    assert "Impact(3)" in rule_set, u.rules
+    assert "Tough(18)" in rule_set, u.rules
+    # And ``Heavy Wheels`` must NOT have ended up as a rule by mistake.
+    assert "Heavy Wheels" not in rule_set
+
+
+def test_parse_unit_table_form_upgrade_spe_subheading_skipped():
+    """A vehicle card with an ``Upgrade SPE`` sub-heading between the
+    weapon table and the non-weapon row must skip the sub-heading and
+    keep reading rows. Without this, the sub-heading would be picked up
+    as the next ``name`` cell and break row alignment."""
+    s = _section(
+        "Great Death Roller [1] - 250pts\n"
+        "Quality 4+   Defense 2+\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Twin Gatling Guns\n24\"\nA12\n1\n-\n"
+        "Upgrade SPE\n"
+        "Heavy Wheels\n-\n-\n-\nImpact(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert {"Twin Gatling Guns", "Heavy Wheels"}.issubset(eq_names), eq_names
+
+
+def test_parse_special_rules_hyphenated_name_preserved():
+    """A glossary entry whose name contains an embedded hyphen
+    (``Counter-Attack``, ``Magic Skitter-Step``) must be indexed with
+    the hyphen intact, not truncated at the first ``-``. The old regex
+    treated bare ``-`` as a name/description separator and silently
+    indexed the rule under just its leading word."""
+    sec = Section(
+        section_type="special_rule",
+        title="Special Rules",
+        blocks=[PageBlock(page=3, text=(
+            "Counter-Attack: When this unit is charged, it may make a "
+            "free attack in melee against the charging unit.\n"
+            "Defense Debuff: This model reduces enemy Defense by 1."
+        ), bbox=(0, 0, 1, 1))],
+    )
+    rules = parse_special_rules(sec)
+    names = {r.name for r in rules}
+    assert "Counter-Attack" in names, names
+    assert "Defense Debuff" in names, names
+    # And we should NOT have stored a stub ``Counter`` rule by mistake.
+    assert "Counter" not in names
+
+
+def test_parse_special_rules_hyphenated_bare_name_paragraph():
+    """A paragraph-block-format rule whose bare-name line contains a
+    hyphen (``Magic Skitter-Step``) must match the bare-name regex and
+    capture the description from the following paragraph."""
+    sec = Section(
+        section_type="special_rule",
+        title="Army Spells",
+        blocks=[PageBlock(page=4, text=(
+            "Magic Skitter-Step\n"
+            "\n"
+            "Target friendly Ratmen unit may move 6\" in any direction, "
+            "including through enemy units.\n"
+        ), bbox=(0, 0, 1, 1))],
+    )
+    rules = parse_special_rules(sec)
+    names = {r.name for r in rules}
+    assert "Magic Skitter-Step" in names, names
+
+
+def test_parse_special_rules_spell_casting_cost_not_parametric():
+    """Spells in an ``Army Spells`` section have a casting cost like
+    ``(1)`` or ``(3)`` in their name, but this is NOT a parametric
+    argument — it's the cost to cast. ``parametric`` must be False for
+    every spell, regardless of the trailing ``(N)``."""
+    sec = Section(
+        section_type="special_rule",
+        title="Army Spells",
+        blocks=[PageBlock(page=5, text=(
+            "Heavenly Strike (1): Target enemy unit within 12\" takes 4 hits.\n"
+            "Lightning Blast (3): Target enemy unit within 18\" takes 8 hits with AP(2)."
+        ), bbox=(0, 0, 1, 1))],
+    )
+    rules = parse_special_rules(sec)
+    names = {r.name for r in rules}
+    assert {"Heavenly Strike", "Lightning Blast"}.issubset(names), names
+    for r in rules:
+        assert r.parametric is False, f"Spell {r.name!r} flagged parametric"
+
+
+def test_parse_special_rules_glossary_keeps_parametric_for_real_rules():
+    """Regression guard: spell-section behaviour (``parametric=False``)
+    must NOT apply to ordinary glossary sections — ``Tough(X)`` is still
+    parametric."""
+    sec = Section(
+        section_type="special_rule",
+        title="Special Rules",
+        blocks=[PageBlock(page=2, text=(
+            "Tough(X) - The unit takes X wounds before being removed."
+        ), bbox=(0, 0, 1, 1))],
+    )
+    rules = parse_special_rules(sec)
+    tough = next(r for r in rules if r.name == "Tough")
+    assert tough.parametric is True
+
+
+def test_parse_special_rules_section_banner_does_not_bleed():
+    """A trailing ``AURA SPECIAL RULES`` / ``ARMY SPELLS`` banner between
+    glossary entries must NOT be glued onto the previous rule's
+    description — the Vanguard / Stealth Aura trailing-bleed bug."""
+    sec = Section(
+        section_type="special_rule",
+        title="Special Rules",
+        blocks=[PageBlock(page=6, text=(
+            "Vanguard - This unit may move 6\" in any direction within 9\""
+            " of its position.\n"
+            "AURA SPECIAL RULES\n"
+            "Stealth Aura - This model and its unit get Stealth.\n"
+            "ARMY SPELLS\n"
+        ), bbox=(0, 0, 1, 1))],
+    )
+    rules = parse_special_rules(sec)
+    by_name = {r.name: r for r in rules}
+    assert "Vanguard" in by_name
+    assert "AURA SPECIAL RULES" not in by_name["Vanguard"].description
+    assert "ARMY SPELLS" not in by_name.get("Stealth Aura", rules[0]).description
