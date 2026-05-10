@@ -180,16 +180,31 @@ def parse_upgrades_text(text: str) -> list[Group]:
     current: Group | None = None
     buf: list[str] = []
     started = False  # True once we've seen the first group anchor
+    # PyMuPDF can glue two unit cards into one section, especially when
+    # the first unit has no upgrade region (so we never see a group
+    # anchor before crossing into the next unit). A unit's profile has
+    # exactly one ``X [N] - Mpts`` line and one ``Quality N+`` line;
+    # a SECOND occurrence of either signals we've crossed into the
+    # next unit. We track both here independently of ``started`` so
+    # the no-upgrade case also terminates cleanly.
+    name_count = 0
+    quality_count = 0
 
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
 
-        # New unit / next stat block — abort. Drop any pending unclosed
-        # option (no cost = not a real option).
-        if started and _is_terminator(line):
-            break
+        if _UNIT_NAME_LINE_RE.match(line):
+            name_count += 1
+            if name_count >= 2:
+                break
+            continue
+        if _UNIT_STAT_LINE_RE.match(line):
+            quality_count += 1
+            if quality_count >= 2:
+                break
+            continue
 
         # New group anchor: close any pending unclosed option silently
         # and start a new group.

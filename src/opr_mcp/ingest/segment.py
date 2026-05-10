@@ -158,7 +158,13 @@ def segment(blocks: Iterable[PageBlock]) -> list[Section]:
                 sections.append(current)
             current = Section(section_type="unit", title=name)
             current.blocks.append(b)
-            pending_qd = True
+            # If this block already contains the unit's Q/D pair, no
+            # separate Q/D block is owed to it. Without this clear,
+            # a follow-up Q/D-only block (which actually belongs to
+            # the next unit in legacy/mixed extractions) would be
+            # absorbed into the current section, corrupting both
+            # unit records.
+            pending_qd = _QUALITY_DEF_RE.search(text) is None
             prev_text = text
             continue
 

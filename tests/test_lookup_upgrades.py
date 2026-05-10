@@ -81,17 +81,61 @@ def test_returns_groups_with_correct_shape(tmp_db):
     ]
 
 
-def test_unit_with_no_upgrades_is_omitted(tmp_db):
-    """A unit that exists but has no upgrade rows (Magma Drake-style
-    pure stat unit) shouldn't appear at all — we don't want callers
-    to confuse 'no rows' with 'options array deliberately empty'."""
+def test_substring_unit_with_no_upgrades_is_omitted(tmp_db):
+    """A SUBSTRING-matched unit with no upgrade rows is dropped from
+    the result so the caller doesn't see noise — but an exact-name
+    match for that unit is kept (see
+    ``test_exact_match_with_no_upgrades_returns_empty_groups``)."""
+    conn = db.open_db(tmp_db)
+    doc = _seed_doc(conn, path="/a/aof.pdf", sha="h",
+                    game_system="aof", army="Volcanic Dwarves", version="3.5.3")
+    _seed_unit(conn, doc, name="Magma Drake Rider",
+               army="Volcanic Dwarves", points=395)
+    conn.commit()
+    # Substring lookup for "Drake" finds Magma Drake Rider, which has
+    # no upgrades — drop it.
+    assert lookup_upgrades.run(conn, "Drake") == []
+
+
+def test_exact_match_with_no_upgrades_returns_empty_groups(tmp_db):
+    """When the queried name matches a unit's name exactly and that
+    unit has no upgrades, return ``[{..., "groups": []}]`` rather
+    than ``[]``. Without this the caller sees an empty result and
+    can't tell whether the unit is missing or simply has no upgrades.
+    Regression for Codex P2 review on lookup_upgrades.py:124."""
     conn = db.open_db(tmp_db)
     doc = _seed_doc(conn, path="/a/aof.pdf", sha="h",
                     game_system="aof", army="Volcanic Dwarves", version="3.5.3")
     _seed_unit(conn, doc, name="Magma Drake",
                army="Volcanic Dwarves", points=295)
     conn.commit()
-    assert lookup_upgrades.run(conn, "Magma Drake") == []
+    [hit] = lookup_upgrades.run(conn, "Magma Drake")
+    assert hit["name"] == "Magma Drake"
+    assert hit["groups"] == []
+
+
+def test_exact_match_wins_over_substring_with_upgrades(tmp_db):
+    """If both ``Magma Drake`` (exact, no upgrades) and ``Magma Drake
+    Rider`` (substring, has upgrades) match the query, the exact
+    match wins. Without this preference the rider's options would be
+    silently substituted for the user's actual question about Magma
+    Drake, producing a wrong cost answer."""
+    conn = db.open_db(tmp_db)
+    doc = _seed_doc(conn, path="/a/aof.pdf", sha="h",
+                    game_system="aof", army="Volcanic Dwarves", version="3.5.3")
+    drake = _seed_unit(conn, doc, name="Magma Drake",
+                       army="Volcanic Dwarves", points=295)
+    rider = _seed_unit(conn, doc, name="Magma Drake Rider",
+                       army="Volcanic Dwarves", points=395)
+    _seed_upgrade(conn, doc_id=doc, unit_id=rider, gi=0,
+                  kind="Upgrade with", oi=0,
+                  text="Banner of Fire (Caster(2))", cost=30)
+    # Drake intentionally has no upgrades.
+    _ = drake
+    conn.commit()
+    rows = lookup_upgrades.run(conn, "Magma Drake")
+    assert [r["name"] for r in rows] == ["Magma Drake"]
+    assert rows[0]["groups"] == []
 
 
 def test_cross_game_system_returns_one_row_per_system(tmp_db):

@@ -80,6 +80,27 @@ DB_PATH = CACHE_DIR / "corpus.db"
 DUMPS_DIR = CACHE_DIR / "dumps"
 MANIFEST_PATH = CACHE_DIR / "manifest.json"
 
+# Source files whose contents define the parser's behaviour. A change
+# in any of these must invalidate the cache, otherwise
+# ``pytest -m local_corpus`` would happily reuse a stale ingest and
+# pass against output that no longer reflects the current code —
+# masking exactly the parser regressions the suite is meant to catch.
+_PARSER_SOURCE_FILES = (
+    _REPO_ROOT / "src" / "opr_mcp" / "ingest" / "segment.py",
+    _REPO_ROOT / "src" / "opr_mcp" / "ingest" / "parse_units.py",
+    _REPO_ROOT / "src" / "opr_mcp" / "ingest" / "parse_upgrades.py",
+    _REPO_ROOT / "src" / "opr_mcp" / "ingest" / "pdf.py",
+    _REPO_ROOT / "src" / "opr_mcp" / "ingest" / "pipeline.py",
+)
+
+
+def _hash_parser_source() -> str:
+    h = hashlib.blake2b(digest_size=16)
+    for p in _PARSER_SOURCE_FILES:
+        if p.exists():
+            h.update(p.read_bytes())
+    return h.hexdigest()
+
 
 def is_corpus_available() -> bool:
     """True iff a usable corpus dir is present and has at least one PDF."""
@@ -94,6 +115,19 @@ def _build_manifest() -> dict[str, dict]:
         st = p.stat()
         out[p.name] = {"size": st.st_size, "mtime": int(st.st_mtime)}
     return out
+
+
+def _build_cache_key() -> dict:
+    """Cache invalidation key: PDF inventory + parser-source hash.
+
+    Two inputs decide whether a cached corpus is reusable: the set of
+    PDFs (size+mtime per file) and the parser code that produced the
+    ingested rows. Either one changing forces a full rebuild.
+    """
+    return {
+        "pdfs": _build_manifest(),
+        "parser_hash": _hash_parser_source(),
+    }
 
 
 def _read_manifest() -> dict | None:
@@ -139,10 +173,15 @@ def ensure_corpus_ingested(
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     DUMPS_DIR.mkdir(parents=True, exist_ok=True)
 
-    desired = _build_manifest()
+    desired = _build_cache_key()
     cached = _read_manifest() or {}
 
-    if not force and DB_PATH.exists() and cached.get("pdfs") == desired:
+    if (
+        not force
+        and DB_PATH.exists()
+        and cached.get("pdfs") == desired["pdfs"]
+        and cached.get("parser_hash") == desired["parser_hash"]
+    ):
         return _summarize_cached()
 
     # Anything stale — wipe and re-ingest. Wiping is preferable to a
@@ -184,7 +223,7 @@ def ensure_corpus_ingested(
     _dump_per_pdf(conn)
 
     _write_manifest({
-        "pdfs": desired,
+        **desired,
         "summary": {
             "documents": docs,
             "chunks": chunks,

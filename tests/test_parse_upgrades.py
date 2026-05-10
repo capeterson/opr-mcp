@@ -191,6 +191,39 @@ Oath of Wrath (Grounded Speed)
     assert _kinds(groups) == ["Upgrade with one"]
 
 
+def test_terminates_before_first_anchor_on_glued_next_unit():
+    """When PyMuPDF glues a no-upgrade unit onto the next one, the
+    parser must abort at the next unit's name+points line BEFORE
+    finding any anchor — otherwise the next unit's groups would be
+    attributed to the current (no-upgrade) unit. Regression for
+    Codex P2 review on parse_upgrades.py:196."""
+    text = """\
+Drake [1] - 295pts
+Quality 4+
+Defense 3+
+Tough 12
+Stomp
+-
+A4
+1
+-
+Magma Champion [1] - 50pts
+Quality 3+
+Defense 5+
+Heavy Hand Weapon
+-
+A3
+-
+-
+Upgrade with one
+Grudge Bearer (Takedown Strike)
++15pts
+"""
+    # Drake has no upgrade groups in this section. The Magma Champion
+    # name line + its anchor must NOT be treated as Drake's upgrades.
+    assert parse_upgrades_text(text) == []
+
+
 def test_no_anchor_means_no_groups():
     """Pure stat-only units like Magma Drake (no upgrades printed)
     must yield an empty list — not a fake group."""

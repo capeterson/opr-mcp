@@ -162,8 +162,9 @@ def _register_tools(mcp_obj: FastMCP) -> None:
             query: Natural-language query, e.g. "how does Tough work" or
                 "AP(2) vs Defense 4+".
             limit: Maximum number of results (default 10).
-            game_system: Optional filter, one of "gf" (Grimdark Future), "aof"
-                (Age of Fantasy), "gff" (Firefight), "skirmish", or "core".
+            game_system: Optional filter. Stored values: "aof", "aofr",
+                "aofq", "gf", "gff", "gfsq", "skirmish" (covers both AOF
+                Skirmish and GF Skirmish), "ftl", or "core".
             army: Optional army-name filter (case-sensitive).
             version: Optional version pin (e.g. "3.5.3"). When omitted, only
                 the latest version of each (game_system, army) book is searched.
@@ -213,10 +214,16 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         Args:
             name: Unit name (or substring). Case-insensitive.
             army: Optional army filter to disambiguate.
-            game_system: Optional game-system filter (``"aof"``,
-                ``"aofr"``, ``"aofs"``, ``"aofq"``, ``"gf"``, ``"gff"``,
-                ``"skirmish"``). Strongly recommended for any cost
-                question — point scales differ across game systems.
+            game_system: Optional game-system filter. Stored values
+                are ``"aof"`` (Age of Fantasy), ``"aofr"`` (Regiments),
+                ``"aofq"`` (Quest, also covers AOFQAI), ``"gf"`` (Grimdark
+                Future), ``"gff"`` (Firefight), ``"gfsq"`` (Grimdark
+                Future Quest, also covers GFSQAI), ``"skirmish"``
+                (covers BOTH AOF Skirmish and GF Skirmish — the banner
+                map collapses ``AOFS`` and ``GFS`` to a single value),
+                ``"ftl"`` (Warfleets FTL), and ``"core"`` (core
+                rulebooks). Strongly recommended for any cost question
+                — point scales differ across game systems.
             version: Optional version pin. When omitted, only the
                 latest army-book version per (game_system, army) is
                 used.

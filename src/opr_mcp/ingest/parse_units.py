@@ -448,6 +448,10 @@ def _parse_paren_line(line: str) -> tuple[list[dict], list[str]] | None:
 # book.
 _STAT_TABLE_HEADER = ("weapon", "rng", "atk", "ap", "spe")
 _STAT_TABLE_ATK_RE = re.compile(r"^A\d+x?$", re.IGNORECASE)
+# Stat-line marker ``Quality 4+`` / ``Q 4+`` — used to bound the
+# table-equipment scan to the current unit's profile region when a
+# section has glued two cards together.
+_STAT_TABLE_QUALITY_RE = re.compile(r"^\s*(?:Q|Quality)\s+\d\+", re.IGNORECASE)
 
 
 def _extract_table_equipment(text: str) -> list[dict]:
@@ -483,9 +487,30 @@ def _extract_table_equipment(text: str) -> list[dict]:
     """
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     n = len(lines)
-    # Find the column header.
+    # Bound the search to the FIRST unit's profile region. If PyMuPDF
+    # glued two cards together, the second unit's name+points line or
+    # Quality line marks the boundary — anything past it belongs to
+    # the next unit, including any table header. Without this guard
+    # the scanner can seed the current unit with the next unit's
+    # weapons.
+    name_count = 0
+    quality_count = 0
+    end_window = n
+    for i, ln in enumerate(lines):
+        if _UNIT_NAME_LINE_RE.match(ln):
+            name_count += 1
+            if name_count >= 2:
+                end_window = i
+                break
+        elif _STAT_TABLE_QUALITY_RE.match(ln):
+            quality_count += 1
+            if quality_count >= 2:
+                end_window = i
+                break
+
+    # Find the column header within the window only.
     start = -1
-    for i in range(n - 4):
+    for i in range(end_window - 4):
         if tuple(lines[i + j].lower() for j in range(5)) == _STAT_TABLE_HEADER:
             start = i + 5
             break
@@ -494,7 +519,7 @@ def _extract_table_equipment(text: str) -> list[dict]:
 
     out: list[dict] = []
     i = start
-    while i + 4 < n:
+    while i + 4 < end_window:
         row = lines[i : i + 5]
         name, rng, atk, ap, spe = row
         # Hard stop on a profile boundary that crept into the table —

@@ -104,10 +104,20 @@ def run(
             return (1, row["name"])
         return (2, row["name"])
 
+    # Exact-name preference: when at least one unit's normalized name
+    # matches the query exactly, restrict the result set to those rows.
+    # Without this, an exact unit with no upgrades (e.g. ``Magma
+    # Drake``) would be silently replaced by a substring-matched unit
+    # that happens to have upgrades (e.g. ``Magma Drake Rider``),
+    # giving a misleading cost answer.
+    exact_matches = [r for r in unit_rows if _normalize(r["name"]) == target]
+    if exact_matches:
+        unit_rows = exact_matches
     unit_rows = sorted(unit_rows, key=score)
 
     out: list[dict] = []
     for u in unit_rows:
+        is_exact = _normalize(u["name"]) == target
         opt_rows = conn.execute(
             """
             SELECT group_index, group_kind, option_index, option_text, points_cost
@@ -117,11 +127,12 @@ def run(
             """,
             (u["unit_id"],),
         ).fetchall()
-        if not opt_rows:
-            # Unit has no structured upgrades (either none in the book
-            # or the data predates structured-upgrade ingest). Skip
-            # rather than return an empty groups array — keeps the
-            # result set focused on actually-actionable rows.
+        if not opt_rows and not is_exact:
+            # Substring-matched unit with no upgrade rows — drop to keep
+            # the result focused. Exact-name matches are always emitted,
+            # even with empty groups, so the caller sees an unambiguous
+            # "this unit has no upgrades" rather than getting a fuzzier
+            # match's data substituted in.
             continue
 
         groups: list[dict] = []
