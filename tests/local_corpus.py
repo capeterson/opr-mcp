@@ -288,9 +288,9 @@ def _qd_proximity(raw_text: str, unit_name: str) -> int | None:
 def _dump_per_pdf(conn) -> None:
     """Write one JSON file per ingested PDF.
 
-    Shape is the same as ``lookup_unit`` + ``lookup_upgrades`` would
-    return, so a Haiku spot-check agent can compare against either
-    tool's contract without re-deriving the schema.
+    Shape mirrors what ``lookup_unit`` returns (units + their structured
+    ``upgrade_groups``), so a Haiku spot-check agent can compare against
+    the tool's contract without re-deriving the schema.
     """
     docs = conn.execute(
         "SELECT id, filename, path, game_system, army, version, page_count "

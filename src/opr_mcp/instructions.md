@@ -26,9 +26,9 @@ order.
 
 ## Point costs — use the structured tool, not free-text search
 
-Point costs for unit upgrades come from the dedicated
-`lookup_upgrades` tool, which returns exact (option text, points)
-pairs parsed from the army book's upgrade tables. Do NOT use
+Point costs for unit upgrades come from `lookup_unit`, which returns
+each unit's `upgrade_groups` — a list of structured (option text,
+points) pairs parsed from the army book's upgrade tables. Do NOT use
 `search_rules` to answer cost questions — `search_rules` returns
 free-text chunks of mangled upgrade-table layout where the pairing
 between an option and its `+Npts` line is unreliable.
@@ -47,28 +47,39 @@ result.
 1. Call `search_rules` with a query like `"force organization"` or
    `"army composition"`, filtered by the relevant `game_system`
    (`"gf"`, `"aof"`, `"gff"`, `"skirmish"`), to retrieve the limits.
-2. Use `list_units(army=...)` and `lookup_unit(...)` to pick units.
-3. Use `lookup_upgrades(name=..., army=..., game_system=...)` to get
-   per-unit upgrade options and exact point costs.
+2. Use `list_units(army=...)` for a quick roster, or
+   `list_units(army=..., details=True)` to pull a whole army's full
+   profiles (stats + equipment + rules + `upgrade_groups`) in a single
+   call.
+3. Use `lookup_unit(name=..., army=..., game_system=...)` for one
+   specific unit when you don't need the whole roster — it returns
+   stats, equipment, named rules, and `upgrade_groups` (option text +
+   exact point cost) in one call.
 4. Use `get_special_rule` for any rule the user names (e.g. `"Tough"`,
-   `"Hero"`).
+   `"Hero"`). If you'll be inspecting many rules on a single unit,
+   pass `include_rule_text=True` to `lookup_unit` (or
+   `list_units(details=True)`) instead — it inlines descriptions on
+   each unit's `rules` list and skips the per-rule round trip.
 5. Before returning the final list, re-check it against the limits from
    step 1 and flag any violation.
 
 ## Tool selection guidance
 
 - Prefer `lookup_unit` over `search_rules` when the user names a
-  specific unit.
-- Prefer `lookup_upgrades` over `search_rules` for any question about
-  upgrade options or upgrade point costs.
-- Prefer `get_special_rule` when the user names a single rule.
+  specific unit. `lookup_unit` returns both stats and upgrade costs in
+  a single call.
+- Prefer `list_units(details=True)` over many `lookup_unit` calls when
+  the user wants to scan or compare a whole army.
+- Prefer `get_special_rule` when the user names a single rule, or use
+  `include_rule_text=True` on the unit lookups to skip the chase
+  entirely.
 - Tool responses may include an `indexing` block while the index is
   still being built — surface that warning rather than treating empty
   results as authoritative.
-- An empty `lookup_upgrades` result for a known unit can mean either
-  (a) the unit genuinely has no upgrade options in that book, or
-  (b) the index was built before structured-upgrade extraction was
-  enabled and the operator hasn't reingested yet. If (b) seems likely,
-  fall back to `search_rules` *only* to surface the upgrade text
-  verbatim, and warn the user that the costs you cite haven't been
-  cross-checked against a structured table.
+- An empty `upgrade_groups` for a known unit can mean either (a) the
+  unit genuinely has no upgrade options in that book, or (b) the index
+  was built before structured-upgrade extraction was enabled and the
+  operator hasn't reingested yet. If (b) seems likely, fall back to
+  `search_rules` *only* to surface the upgrade text verbatim, and warn
+  the user that the costs you cite haven't been cross-checked against
+  a structured table.

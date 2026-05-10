@@ -119,7 +119,11 @@ def test_pdf_banner_captures_version():
     assert m.group("version") == "3.5.3"
 
 
-def test_lookup_unit_reports_has_upgrades(tmp_db):
+def test_lookup_unit_inlines_upgrade_groups(tmp_db):
+    """``lookup_unit`` returns ``upgrade_groups`` inline for every
+    matched unit — populated when the unit has structured upgrades,
+    an empty list when it doesn't — so callers never need a second
+    tool call to learn what a unit's upgrades cost."""
     conn = db.open_db(tmp_db)
     doc = _seed_doc(conn, path="/a/a.pdf", sha="h1",
                     game_system="aof", army="Beastmen", version="1.0")
@@ -137,5 +141,8 @@ def test_lookup_unit_reports_has_upgrades(tmp_db):
     conn.commit()
 
     by_name = {r["name"]: r for r in lookup_unit.run(conn, "Upgrades")}
-    assert by_name["WithUpgrades"]["has_upgrades"] is True
-    assert by_name["NoUpgrades"]["has_upgrades"] is False
+    assert by_name["WithUpgrades"]["upgrade_groups"] == [
+        {"kind": "Upgrade with one",
+         "options": [{"text": "Halberd", "points_cost": 5}]},
+    ]
+    assert by_name["NoUpgrades"]["upgrade_groups"] == []
