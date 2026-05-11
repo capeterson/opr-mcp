@@ -26,3 +26,8 @@ dumps/
 pdf_text/
 agent_briefs/
 bucket-*.json
+# Per-finding validator output — embeds quoted text from copyrighted
+# PDFs (rule descriptions, unit raw_text excerpts, etc.). The
+# committed VALIDATION_*.md reports summarize the result without
+# leaking source text.
+validation_*.json

@@ -37,8 +37,28 @@ def run(
     if scope:
         sql += " AND s.scope = ?"
         params.append(scope)
-    # Prefer 'core' scope when multiple match.
-    sql += " ORDER BY CASE WHEN s.scope = 'core' THEN 0 ELSE 1 END, s.id LIMIT 1"
+    # When multiple matches exist, the precedence depends on whether
+    # ``game_system`` was specified.
+    #
+    # * If yes → prefer scope='army' first. Army-book glossaries are
+    #   the authoritative source for that game system; core glossaries
+    #   in advanced-rules PDFs sometimes contain over-permissive
+    #   captures (e.g. an AOF Skill-Trait roll-table named ``Vanguard``
+    #   that's distinct from the army-wide ``Vanguard`` movement rule).
+    # * If no → prefer scope='core' first (cross-system core glossary
+    #   entries are usually correct, and the consensus is more reliable
+    #   than picking one army's variant).
+    if game_system:
+        # Army-book rule scopes are stored as ``army:<army-name>`` (e.g.
+        # ``army:High Elves``), so a ``LIKE 'army%'`` prefix match
+        # covers them all.
+        sql += (
+            " ORDER BY CASE WHEN s.scope LIKE 'army%' THEN 0 ELSE 1 END, s.id LIMIT 1"
+        )
+    else:
+        sql += (
+            " ORDER BY CASE WHEN s.scope = 'core' THEN 0 ELSE 1 END, s.id LIMIT 1"
+        )
     row = conn.execute(sql, params).fetchone()
     if row is None:
         return None

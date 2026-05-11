@@ -130,3 +130,46 @@ def test_search_rules_with_parametric_query(ingested_db):
     assert results
     joined = " ".join(r["text"] for r in results).lower()
     assert "ap" in joined
+
+
+def test_get_special_rule_prefers_army_when_game_system_filtered(tmp_db):
+    """When a game_system filter is in play AND the same rule name has
+    both an army-scoped and a core-scoped definition for that system,
+    prefer the army-scoped one. This handles the AOF Advanced Rules
+    over-permissive glossary capture (e.g. a Skill-Trait roll-table
+    entry named ``Vanguard`` distinct from the army-wide ``Vanguard``
+    movement rule)."""
+    from opr_mcp import db
+    from opr_mcp.tools import get_special_rule
+
+    conn = db.open_db(tmp_db)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO documents (id, filename, path, sha256, page_count, "
+        " game_system, army, version, ingested_at) "
+        "VALUES (1, 'core.pdf', '/x/core.pdf', 'a', 100, 'aof', NULL, '3.5.1', '2026-01-01')"
+    )
+    cur.execute(
+        "INSERT INTO documents (id, filename, path, sha256, page_count, "
+        " game_system, army, version, ingested_at) "
+        "VALUES (2, 'army.pdf', '/x/army.pdf', 'b', 10, 'aof', 'High Elves', '3.5.3', '2026-01-02')"
+    )
+    cur.execute(
+        "INSERT INTO special_rules (document_id, name, parametric, scope, description) "
+        "VALUES (1, 'Vanguard', 0, 'core', 'WRONG core text from Skill-Trait table.')"
+    )
+    cur.execute(
+        "INSERT INTO special_rules (document_id, name, parametric, scope, description) "
+        "VALUES (2, 'Vanguard', 0, 'army:High Elves', 'After this model is deployed, it may be placed within 9 inches.')"
+    )
+    conn.commit()
+
+    # With game_system filter → army-scoped wins.
+    r = get_special_rule.run(conn, 'Vanguard', game_system='aof')
+    assert r is not None
+    assert 'deployed' in r['description'], r
+
+    # Without game_system filter → core-scoped still wins (legacy).
+    r2 = get_special_rule.run(conn, 'Vanguard')
+    assert r2 is not None
+    assert 'WRONG' in r2['description'], r2

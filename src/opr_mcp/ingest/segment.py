@@ -11,7 +11,17 @@ from .pdf import PageBlock
 # to avoid a circular import — ``parse_units`` consumes ``Section`` from
 # this module, so this module can't import from there.
 _UNIT_NAME_LINE_RE = re.compile(
-    r"^(?P<name>[A-Za-z][A-Za-z' \-/]+?)\s*\[\s*(?P<qty>\d{1,2})\s*\]\s*-\s*(?P<pts>\d{1,4})\s*(?:pts|points)\b",
+    # ``\d{1,6}`` (not ``\d{1,4}``) to match the AI-Quest variants and
+    # the dual-cost ``95110pts`` glitch. The character class permits
+    # ``&`` for paired-hero names (``Omoshu & Kothiz``), ``"`` for
+    # nicknames (``Ranjo "Swiftsnare"``), and digits for serial-
+    # numbered units (``Echo-3G01``). Must stay in lock-step with
+    # ``parse_units._UNIT_NAME_LINE_RE`` so the segmenter and parser
+    # agree on what counts as a unit-card header — otherwise the
+    # name-line block gets absorbed into the prior section and the
+    # parse_unit fallback picks up a weapon name (``Heavy Claws``) or
+    # a rule token (``Unique``) as the unit name.
+    r"^(?P<name>[A-Za-z][A-Za-z0-9'&\" \-/]+?)\s*\[\s*(?P<qty>\d{1,2})\s*\]\s*-\s*(?P<pts>\d{1,6})\s*(?:pts|points)\b",
     re.IGNORECASE,
 )
 

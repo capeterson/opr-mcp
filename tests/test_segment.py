@@ -106,3 +106,21 @@ def test_segment_recognises_aura_special_rules_heading():
     sections = segment(blocks)
     titles = [s.title for s in sections if s.section_type == "special_rule"]
     assert "Aura Special Rules" in titles
+
+
+def test_segment_name_line_trigger_handles_six_digit_points():
+    """``Waskatsin [1] - 100000pts`` (real GFF Goblin Reclaimers Hero)
+    must trigger a unit-section start in the segmenter. Pre-fix the
+    regex capped at 4 digits so the name-line block was absorbed into
+    the previous section, and the unit ended up nameless / pointless."""
+    from opr_mcp.ingest.pdf import PageBlock
+    from opr_mcp.ingest.segment import segment
+    blocks = [
+        PageBlock(page=1, text="GFF - GOBLIN RECLAIMERS V3.5.3", bbox=(0, 0, 1, 1)),
+        PageBlock(page=3, text="Waskatsin [1] - 100000pts", bbox=(0, 0, 1, 1)),
+        PageBlock(page=3, text="Quality 4+\nDefense 3+\nTough 6", bbox=(0, 0, 1, 1)),
+    ]
+    secs = segment(blocks)
+    unit_secs = [s for s in secs if s.section_type == "unit"]
+    assert len(unit_secs) == 1, [(s.section_type, s.title) for s in secs]
+    assert unit_secs[0].title == "Waskatsin"
