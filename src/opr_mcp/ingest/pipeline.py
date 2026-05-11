@@ -86,6 +86,24 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
         stats.skipped += 1
         return stats
 
+    # Advisory duplicate-sha fast path: when these exact bytes are already
+    # tracked under another filename (common for Forge orphan duplicates
+    # left over from filename-format changes), skip before the expensive
+    # parse / embedding work. The write phase repeats this check under
+    # the lock to handle the race where another worker commits during
+    # our parse.
+    duplicate = conn.execute(
+        "SELECT filename FROM documents WHERE sha256 = ?",
+        (digest,),
+    ).fetchone()
+    if duplicate:
+        log.info(
+            "Skipping %s: identical content already ingested as %s",
+            path.name, duplicate["filename"],
+        )
+        stats.skipped += 1
+        return stats
+
     meta = detect_metadata(path)
     pages = page_count(path)
 
@@ -148,6 +166,18 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
     # before deciding what to do.
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # Re-hash the file under the lock. If a writer-side rewrite landed
+        # while we were parsing (Forge re-download, manual replace, or
+        # another worker that won the lock race ahead of us and updated
+        # the file on disk too), our parsed content is stale — skip
+        # rather than overwriting a fresher commit with our old parse.
+        fresh_digest = sha256_file(path)
+        if fresh_digest != digest:
+            log.info("Skipping %s: file changed during parse", path.name)
+            stats.skipped += 1
+            conn.rollback()
+            return stats
+
         current = conn.execute(
             "SELECT id, sha256 FROM documents WHERE filename = ? OR path = ?",
             (path.name, str(path)),
