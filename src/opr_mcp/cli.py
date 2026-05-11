@@ -265,8 +265,8 @@ def forge_scan(
     )
     typer.echo(
         f"Forge scan: {stats.new} new, {stats.changed} changed, "
-        f"{stats.unchanged} unchanged, {len(stats.failed)} failed "
-        f"(of {stats.seen} pair(s)). PDFs at {target}"
+        f"{stats.unchanged} unchanged, {stats.details_synced} details synced, "
+        f"{len(stats.failed)} failed (of {stats.seen} pair(s)). PDFs at {target}"
     )
     if stats.failed:
         for name, err in stats.failed[:10]:

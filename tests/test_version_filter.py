@@ -146,3 +146,56 @@ def test_lookup_unit_inlines_upgrade_groups(tmp_db):
          "options": [{"text": "Halberd", "points_cost": 5}]},
     ]
     assert by_name["NoUpgrades"]["upgrade_groups"] == []
+
+
+def test_filtered_doc_ids_returns_both_forge_api_and_pdf_at_same_version(tmp_db):
+    """A single logical Forge book can land as two physical documents at
+    the same versionString — the PDF mirror (owns chunks / special_rules)
+    and the synthetic forge-api:// doc (owns units / unit_upgrades). When
+    no explicit version pin is in play, ``filtered_document_ids`` must
+    return both so the unit-side caller's JOIN finds the API doc and the
+    rule-side caller's JOIN finds the PDF doc. Returning only the
+    most-recently-ingested one (PDF, ordinarily) hides the API doc and
+    breaks ``lookup_unit`` whenever ``FORGE_INGEST_PDF_UNITS`` is off.
+    """
+    conn = db.open_db(tmp_db)
+    api_doc = _seed_doc(conn, path="forge-api://U~4", sha="h-api",
+                        game_system="aof", army="Beastmen", version="3.5.3")
+    pdf_doc = _seed_doc(conn, path="/a/book.pdf", sha="h-pdf",
+                        game_system="aof", army="Beastmen", version="3.5.3")
+    # Stale older PDF must still be excluded — only the top-version docs
+    # come back.
+    older = _seed_doc(conn, path="/a/book-old.pdf", sha="h-old",
+                      game_system="aof", army="Beastmen", version="2.0.0")
+    conn.commit()
+    ids = set(filtered_document_ids(conn, army="Beastmen"))
+    assert ids == {api_doc, pdf_doc}
+    assert older not in ids
+
+
+def test_lookup_unit_finds_forge_api_units_even_when_pdf_doc_is_newer(tmp_db):
+    """The PDF is downloaded then ingested AFTER the API doc is written,
+    so its ingested_at timestamp is later. With the old pick-one-per-
+    bucket rule that PDF doc (which has zero units when the PDF unit
+    parser is off) would win and lookup_unit would return nothing for
+    the army. The fix is to return all docs at the top version per
+    bucket; this regression test pins that behavior.
+    """
+    conn = db.open_db(tmp_db)
+    # Earlier ingested_at on the API doc.
+    api_doc = _seed_doc(conn, path="forge-api://U~4", sha="h-api",
+                        game_system="aof", army="Beastmen", version="3.5.3")
+    _seed_unit(conn, api_doc, name="Berserker", army="Beastmen", points=85)
+    # PDF doc ingested later, no units of its own (PDF unit parsing off).
+    conn.execute(
+        "INSERT INTO documents (path, filename, sha256, game_system, title, "
+        "army, version, page_count, ingested_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("/a/book.pdf", "book.pdf", "h-pdf", "aof", "T", "Beastmen",
+         "3.5.3", 1, "2026-06-01"),
+    )
+    conn.commit()
+
+    rows = lookup_unit.run(conn, "Berserker")
+    assert [r["name"] for r in rows] == ["Berserker"]
+    assert rows[0]["base_points"] == 85

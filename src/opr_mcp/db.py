@@ -10,7 +10,7 @@ from .config import EMBED_DIM, auth_db_path, db_path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 SCHEMA = f"""
@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS units (
     base_points     INTEGER,
     equipment_json  TEXT,
     rules_json      TEXT,
-    raw_text        TEXT NOT NULL
+    raw_text        TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'pdf'
 );
 CREATE INDEX IF NOT EXISTS idx_units_lookup ON units(army, name);
 
@@ -69,7 +70,8 @@ CREATE TABLE IF NOT EXISTS unit_upgrades (
     option_index    INTEGER NOT NULL,
     option_text     TEXT NOT NULL,
     points_cost     INTEGER NOT NULL,
-    raw_text        TEXT NOT NULL
+    raw_text        TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'pdf'
 );
 CREATE INDEX IF NOT EXISTS idx_unit_upgrades_unit ON unit_upgrades(unit_id);
 CREATE INDEX IF NOT EXISTS idx_unit_upgrades_doc ON unit_upgrades(document_id);
@@ -109,18 +111,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
 );
 
 CREATE TABLE IF NOT EXISTS forge_books (
-    uid           TEXT NOT NULL,
-    game_system   INTEGER NOT NULL,
-    render_id     TEXT NOT NULL,
-    name          TEXT,
-    faction       TEXT,
-    version       TEXT,
-    official      INTEGER NOT NULL DEFAULT 1,
-    pdf_filename  TEXT,
-    pdf_path      TEXT,
-    local_path    TEXT,
-    last_checked  TEXT NOT NULL,
-    last_changed  TEXT NOT NULL,
+    uid                 TEXT NOT NULL,
+    game_system         INTEGER NOT NULL,
+    render_id           TEXT NOT NULL,
+    name                TEXT,
+    faction             TEXT,
+    version             TEXT,
+    official            INTEGER NOT NULL DEFAULT 1,
+    pdf_filename        TEXT,
+    pdf_path            TEXT,
+    local_path          TEXT,
+    last_checked        TEXT NOT NULL,
+    last_changed        TEXT NOT NULL,
+    modified_at         TEXT,
+    detail_synced_at    TEXT,
+    detail_modified_at  TEXT,
     PRIMARY KEY (uid, game_system, render_id)
 );
 CREATE INDEX IF NOT EXISTS idx_forge_changed ON forge_books(last_changed);
@@ -306,6 +311,30 @@ def _migrate_forward(conn: sqlite3.Connection, from_version: int) -> None:
     # `opr-mcp reingest` (or any new PDF lands and gets parsed).
     if from_version < 3:
         pass  # purely additive; nothing extra to do
+    # 3 -> 4: Forge JSON ingest path. Adds source-tracking on units /
+    # unit_upgrades (existing rows are PDF-sourced; default fills them in)
+    # and adds modified_at + detail_synced_at + detail_modified_at to
+    # forge_books so the next sync can decide which books need a
+    # structured-detail re-fetch. The new tables/columns are created via
+    # CREATE/IF NOT EXISTS in SCHEMA for fresh DBs; for existing DBs we
+    # need explicit ALTERs.
+    if from_version < 4:
+        _add_column_if_missing(conn, "units", "source", "TEXT NOT NULL DEFAULT 'pdf'")
+        _add_column_if_missing(
+            conn, "unit_upgrades", "source", "TEXT NOT NULL DEFAULT 'pdf'",
+        )
+        _add_column_if_missing(conn, "forge_books", "modified_at", "TEXT")
+        _add_column_if_missing(conn, "forge_books", "detail_synced_at", "TEXT")
+        _add_column_if_missing(conn, "forge_books", "detail_modified_at", "TEXT")
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str,
+) -> None:
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column in cols:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def open_db(path: Path | None = None) -> sqlite3.Connection:

@@ -190,3 +190,78 @@ def test_sweep_groups_by_uid_not_army_name(tmp_db, tmp_path):
     for r in rows:
         by_uid.setdefault(r["uid"], set()).add(r["version"])
     assert by_uid == {"A": {"2.0", "3.0", "4.0"}, "B": {"2.0", "3.0", "4.0"}}
+
+
+def test_sweep_drops_synthetic_api_doc_when_last_row_for_pair_pruned(tmp_db, tmp_path):
+    """When an out-of-scope sweep removes the last ``forge_books`` row
+    for a (uid, game_system), the synthetic ``forge-api://uid~gs``
+    document that owns its JSON-sourced units must also be dropped —
+    otherwise those out-of-scope units linger in ``documents``/``units``
+    and ``lookup_unit`` keeps returning them.
+    """
+    conn = db.open_db(tmp_db)
+    _add_forge_book(
+        conn, uid="A", game_system=4, render_id="RID1", version="1.0",
+        local_path=tmp_path / "a.pdf", last_changed="2026-01-01",
+    )
+    # Seed the synthetic forge-api:// doc + a unit row under it, mirroring
+    # what ingest_forge_book would produce.
+    conn.execute(
+        "INSERT INTO documents (path, filename, sha256, game_system, title, "
+        "army, version, page_count, ingested_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("forge-api://A~4", "A~4.json", "h-api", "aof", "Alpha", "Alpha",
+         "1.0", 0, "2026-01-01"),
+    )
+    syn_doc = conn.execute(
+        "SELECT id FROM documents WHERE path = 'forge-api://A~4'",
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO units (document_id, army, name, qty, quality, defense, "
+        "base_points, equipment_json, rules_json, raw_text, source) "
+        "VALUES (?, 'Alpha', 'Berserker', 1, '4+', '5+', 50, '[]', '[]', '', "
+        "'forge-api')",
+        (syn_doc,),
+    )
+    conn.commit()
+
+    # Narrow scope to a game system that doesn't include 4.
+    stats = cleanup.sweep(conn, allowed_game_systems={5})
+    assert stats.pruned_out_of_scope == 1
+    # Synthetic doc gone, and its units cascaded away.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM documents WHERE path = 'forge-api://A~4'",
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM units WHERE document_id = ?", (syn_doc,),
+    ).fetchone()[0] == 0
+
+
+def test_sweep_keeps_synthetic_doc_when_other_renders_survive(tmp_db, tmp_path):
+    """When version-cap pruning removes some but not all forge_books
+    rows for a (uid, game_system), the synthetic doc must STAY — the
+    surviving renders still belong to that logical book.
+    """
+    conn = db.open_db(tmp_db)
+    # 4 renders, version cap 3 → oldest version gets pruned, three survive.
+    for ver, ts in [("1.0", "2026-01-01"), ("2.0", "2026-02-01"),
+                    ("3.0", "2026-03-01"), ("4.0", "2026-04-01")]:
+        _add_forge_book(
+            conn, uid="A", game_system=4, render_id=f"R{ver}",
+            version=ver, local_path=tmp_path / f"a-{ver}.pdf",
+            last_changed=ts,
+        )
+    conn.execute(
+        "INSERT INTO documents (path, filename, sha256, game_system, title, "
+        "army, version, page_count, ingested_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("forge-api://A~4", "A~4.json", "h-api", "aof", "Alpha", "Alpha",
+         "4.0", 0, "2026-04-01"),
+    )
+    conn.commit()
+
+    cleanup.sweep(conn, retain_versions=3)
+    # Synthetic doc still there — three renders still represent the book.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM documents WHERE path = 'forge-api://A~4'",
+    ).fetchone()[0] == 1

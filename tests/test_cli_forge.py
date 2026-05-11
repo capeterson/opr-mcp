@@ -51,6 +51,7 @@ def test_forge_scan_exits_zero_on_clean_run(tmp_db, tmp_path, monkeypatch):
     with (
         patch.object(api, "list_books", return_value=[_book("U", "U", [4])]),
         patch.object(api, "resolve_pdf", side_effect=stub_resolve),
+        patch.object(api, "fetch_book_detail", return_value={}),
         patch.object(sync, "_http_download", return_value=10),
     ):
         result = runner.invoke(app, ["forge-scan", "--pdf-dir", str(tmp_path)])

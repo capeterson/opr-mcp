@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import embeddings
+from ..config import forge_ingest_pdf_units
 from .chunk import Chunk, chunk_blocks
 from .parse_units import equipment_json, parse_special_rules, parse_unit, rules_json
 from .parse_upgrades import parse_upgrades
@@ -131,12 +132,19 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
         vecs = embeddings.encode([c.text for c in chunks])
         chunk_blobs = [embeddings.to_blob(v) for v in vecs]
 
+    # Unit/upgrade extraction from PDFs is off by default — the Forge JSON
+    # ingest path owns those rows, and parsing them from the PDF is the
+    # fragile part the JSON path replaces. Set FORGE_INGEST_PDF_UNITS=true to
+    # turn the PDF unit/upgrade parser back on (useful as a fallback for any
+    # book that isn't on Forge). Special-rule prose is always extracted —
+    # search_rules and the include_rule_text enrichment depend on it.
+    parse_unit_blocks = forge_ingest_pdf_units()
     parsed_units: list[tuple[int, object, list]] = []
     parsed_rules: list[tuple[int, list]] = []
     units_skipped = 0
     for sec_i, sec in enumerate(sections):
         try:
-            if sec.section_type == "unit":
+            if sec.section_type == "unit" and parse_unit_blocks:
                 u = parse_unit(sec)
                 if u is None:
                     units_skipped += 1
