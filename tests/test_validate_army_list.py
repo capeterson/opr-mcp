@@ -9,10 +9,10 @@ from __future__ import annotations
 from opr_mcp.tools import validate_army_list as v
 
 
-def _spearmen(qty: int = 1, total_pts: int = 100) -> dict:
+def _spearmen(copies: int = 1, total_pts: int = 100) -> dict:
     return {
         "unit_name": "Spearmen",
-        "qty": qty,
+        "copies": copies,
         "total_pts": total_pts,
         "is_hero": False,
     }
@@ -21,7 +21,7 @@ def _spearmen(qty: int = 1, total_pts: int = 100) -> dict:
 def _hero(name: str = "Wizard", pts: int = 70) -> dict:
     return {
         "unit_name": name,
-        "qty": 1,
+        "copies": 1,
         "total_pts": pts,
         "is_hero": True,
     }
@@ -33,11 +33,11 @@ def _attached(
     hero_name: str = "Wizard",
     hero_pts: int = 70,
     hero_tough: int | None = None,
-    qty: int = 1,
+    copies: int = 1,
 ) -> dict:
     return {
         "unit_name": unit_name,
-        "qty": qty,
+        "copies": copies,
         "total_pts": unit_pts,
         "attached_hero_name": hero_name,
         "attached_hero_pts": hero_pts,
@@ -85,10 +85,10 @@ def test_limits_at_2000_pts():
 def test_passing_list_passes():
     units = [
         _hero(),
-        _spearmen(qty=1, total_pts=100),
-        _spearmen(qty=1, total_pts=100),
-        {"unit_name": "Cavalry", "qty": 1, "total_pts": 200, "is_hero": False},
-        {"unit_name": "Archers", "qty": 1, "total_pts": 150, "is_hero": False},
+        _spearmen(copies=1, total_pts=100),
+        _spearmen(copies=1, total_pts=100),
+        {"unit_name": "Cavalry", "copies": 1, "total_pts": 200, "is_hero": False},
+        {"unit_name": "Archers", "copies": 1, "total_pts": 150, "is_hero": False},
     ]
     out = v.run(750, units)
     assert out["passed"], out["checks"]
@@ -102,7 +102,7 @@ def test_too_many_heroes_fails_HEROES_check():
 
 
 def test_oversized_unit_fails_UNIT_COST_CAP():
-    units = [{"unit_name": "Big", "qty": 1, "total_pts": 270}]
+    units = [{"unit_name": "Big", "copies": 1, "total_pts": 270}]
     out = v.run(750, units)
     assert not _check(out, "UNIT_COST_CAP")["ok"]
 
@@ -124,10 +124,10 @@ def test_attached_hero_counts_as_one_unit_count():
     """Hero + attached unit = 1 unit toward the count cap, not 2."""
     units = [
         _attached(),
-        _spearmen(qty=1),
-        _spearmen(qty=1),
-        _spearmen(qty=1),
-        _spearmen(qty=1),
+        _spearmen(copies=1),
+        _spearmen(copies=1),
+        _spearmen(copies=1),
+        _spearmen(copies=1),
     ]
     out = v.run(750, units)
     assert out["computed"]["total_unit_count"] == 5
@@ -147,15 +147,15 @@ def test_attached_hero_counts_as_one_for_duplicates():
 
 
 def test_too_many_duplicates_fails():
-    units = [_spearmen(qty=3)]
+    units = [_spearmen(copies=3)]
     out = v.run(750, units)
     assert not _check(out, "DUPLICATES")["ok"]
 
 
 def test_too_many_units_fails_UNIT_COUNT_CAP():
-    units = [_spearmen(qty=1) for _ in range(6)]
-    # qty inflates duplicates too — give them distinct names so this tests
-    # the unit count cap in isolation.
+    units = [_spearmen(copies=1) for _ in range(6)]
+    # copies inflates duplicates too — give them distinct names so this
+    # test exercises the unit count cap in isolation.
     for i, u in enumerate(units):
         u["unit_name"] = f"Unit{i}"
     out = v.run(750, units)
@@ -180,17 +180,84 @@ def test_no_attachments_omits_HERO_ATTACHMENT_TOUGH_row():
     assert "HERO_ATTACHMENT_TOUGH" not in rules_present
 
 
-def test_qty_field_inflates_duplicate_count():
-    # qty=3 with one entry == three separate entries with qty=1 for dup purposes.
-    out = v.run(750, [_spearmen(qty=3)])
-    out_split = v.run(750, [_spearmen(qty=1) for _ in range(3)])
+def test_copies_field_inflates_duplicate_count():
+    # copies=3 with one entry == three separate entries with copies=1 for dup purposes.
+    out = v.run(750, [_spearmen(copies=3)])
+    out_split = v.run(750, [_spearmen(copies=1) for _ in range(3)])
     dup1 = _check(out, "DUPLICATES")["ok"]
     dup2 = _check(out_split, "DUPLICATES")["ok"]
     assert dup1 == dup2 is False
 
 
+# ---------------------------------------------------------------------------
+# INPUT_VALID gate: malformed entries fail loudly instead of silently
+# coercing missing/non-positive values to zero.
+# ---------------------------------------------------------------------------
+
+
+def test_missing_total_pts_fails_INPUT_VALID():
+    """A unit-card-shaped entry (with ``base_points`` instead of
+    ``total_pts``) silently passing the cost cap was the failure mode
+    Codex flagged. Reject it instead.
+    """
+    units = [{"unit_name": "Spearmen", "copies": 1, "base_points": 100}]
+    out = v.run(750, units)
+    assert not out["passed"]
+    assert _check(out, "INPUT_VALID")["ok"] is False
+    assert "total_pts" in _check(out, "INPUT_VALID")["detail"]
+
+
+def test_attached_hero_without_pts_fails_INPUT_VALID():
+    units = [{
+        "unit_name": "Spearmen",
+        "copies": 1,
+        "total_pts": 175,
+        "attached_hero_name": "Wizard Lord",
+        # attached_hero_pts deliberately omitted
+    }]
+    out = v.run(750, units)
+    assert not out["passed"]
+    assert _check(out, "INPUT_VALID")["ok"] is False
+    assert "attached_hero_pts" in _check(out, "INPUT_VALID")["detail"]
+
+
+def test_zero_copies_fails_INPUT_VALID():
+    units = [_spearmen(copies=0)]
+    out = v.run(750, units)
+    assert not out["passed"]
+    assert _check(out, "INPUT_VALID")["ok"] is False
+
+
+def test_negative_copies_fails_INPUT_VALID():
+    units = [_spearmen(copies=-10)]
+    out = v.run(750, units)
+    assert not out["passed"]
+    assert _check(out, "INPUT_VALID")["ok"] is False
+
+
+def test_input_valid_failure_omits_math_checks():
+    """When INPUT_VALID fails, the math checks are skipped — they would
+    be misleading on incomplete input.
+    """
+    units = [{"unit_name": "X", "copies": 1}]  # missing total_pts
+    out = v.run(750, units)
+    rules = {c["rule"] for c in out["checks"]}
+    assert rules == {"INPUT_VALID"}
+    assert out["computed"] is None
+
+
+def test_copies_defaults_to_one_when_omitted():
+    """Default ``copies`` to 1 — the friendly path for callers that
+    treat each list entry as one roster slot.
+    """
+    units = [{"unit_name": "Spearmen", "total_pts": 100}]  # no copies
+    out = v.run(750, units)
+    assert out["passed"]
+    assert out["computed"]["total_unit_count"] == 1
+
+
 def test_checklist_markdown_contains_filled_values():
-    units = [_hero(), _spearmen(qty=2)]
+    units = [_hero(), _spearmen(copies=2)]
     out = v.run(750, units)
     md = out["checklist_markdown"]
     assert "Game size:           750 pts" in md
@@ -199,9 +266,9 @@ def test_checklist_markdown_contains_filled_values():
 
 def test_passed_is_AND_of_all_checks():
     # Three legal units, one cost violation
-    units = [_spearmen(), {"unit_name": "Big", "qty": 1, "total_pts": 270}]
+    units = [_spearmen(), {"unit_name": "Big", "copies": 1, "total_pts": 270}]
     out = v.run(750, units)
     assert out["passed"] is False
     # Now an entirely clean list
-    out_ok = v.run(750, [_spearmen(qty=1)])
+    out_ok = v.run(750, [_spearmen(copies=1)])
     assert out_ok["passed"] is True

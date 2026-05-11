@@ -42,14 +42,19 @@ _DEFAULT_INSTRUCTIONS_RESOURCE = "instructions.md"
 _INSTRUCTIONS_RESOURCE_URI = "opr://instructions/force-org"
 _cached_instructions: str | None = None
 
-# Short, ~80-token digest of the four force-org rules. Used in four places:
-# the FastMCP handshake string, the per-call ``force_org_reminder`` sibling
-# field, the nested ``force_org_summary`` block on list-tool payloads, and
-# the validator's checklist header. Centralized so wording stays in sync
-# across channels. NOTE: if you change this, also update the 2-line
-# preamble pasted into the 5 army-building tool docstrings below.
+# Short, ~80-token digest of the four AoF/GF force-org rules. Emitted by
+# ``_short_summary()`` in three places: the FastMCP handshake string, the
+# per-call ``force_org_reminder`` sibling field, and the nested
+# ``force_org_summary`` block on list-tool payloads. Wording is verified
+# only for AoF and GF (per ``instructions.md`` — other game systems like
+# Firefight, Skirmish, Quest, FTL may have different formulas), so the
+# scope claim is constrained accordingly.
+#
+# NOTE: if you change this, also update the 2-line preamble pasted into
+# the 5 army-building tool docstrings below.
 _FORCE_ORG_SUMMARY = (
-    "Force-org rules (G = game size in pts; identical for AoF and GF):\n"
+    "AoF / Grimdark Future force-org rules "
+    "(G = game size in pts; verified in both core rulebooks):\n"
     "  1. HEROES         max floor(G/375) hero units\n"
     "  2. DUPLICATES     max (1 + floor(G/750)) of the same unit "
     "(combined units = 1)\n"
@@ -60,13 +65,46 @@ _FORCE_ORG_SUMMARY = (
     "before finalizing any list."
 )
 
-_HANDSHAKE_INSTRUCTIONS = (
-    "This server provides One Page Rules army-book lookups. Before building "
-    "or validating any army list, call `force_org_guidance` to read the "
-    "force-organization rules — they apply to every list unless the user "
-    "explicitly says 'ignore force org' or 'narrative list'.\n\n"
-    + _FORCE_ORG_SUMMARY
+# Pointer used in place of ``_FORCE_ORG_SUMMARY`` when the operator has
+# overridden ``instructions.md`` via ``INSTRUCTIONS_FILE``. The hardcoded
+# AoF/GF digest would contradict whatever custom guidance the operator
+# loaded; degrade to a generic pointer that simply directs the model to
+# the dedicated tool/resource.
+_FORCE_ORG_SUMMARY_OVERRIDE_POINTER = (
+    "Custom force-org guidance is configured for this server. Call "
+    "`force_org_guidance` (or read the `opr://instructions/force-org` "
+    "resource) for the full rules before building any army list."
 )
+
+
+def _short_summary() -> str:
+    """Return the short summary for handshake / reminder / embed channels.
+
+    When ``INSTRUCTIONS_FILE`` is set, the operator's full guidance has
+    been customized — broadcasting the hardcoded AoF/GF digest in the
+    short channels would contradict it. Degrade to a pointer in that
+    case; the dedicated tool, resource, and first-call sibling still
+    deliver the full custom text.
+    """
+    if instructions_file() is not None:
+        return _FORCE_ORG_SUMMARY_OVERRIDE_POINTER
+    return _FORCE_ORG_SUMMARY
+
+
+def _handshake_instructions() -> str:
+    """Build the FastMCP ``instructions=`` handshake string lazily.
+
+    Built per-call so ``INSTRUCTIONS_FILE`` overrides take effect at
+    server-build time rather than module-import time.
+    """
+    return (
+        "This server provides One Page Rules army-book lookups. Before "
+        "building or validating any AoF or Grimdark Future army list, "
+        "call `force_org_guidance` to read the force-organization rules "
+        "— they apply to AoF/GF lists unless the user explicitly says "
+        "'ignore force org' or 'narrative list'.\n\n"
+        + _short_summary()
+    )
 
 # Sessions that have already received the auto-injected instructions on a
 # prior tool response. Keyed on the live ServerSession object so entries
@@ -201,7 +239,7 @@ def _finalize(payload, ctx: Context | None, *, kind: str = "default"):
                 with contextlib.suppress(TypeError):
                     _greeted_sessions.add(session)
 
-            reminder_text = _FORCE_ORG_SUMMARY
+            reminder_text = _short_summary()
             if (
                 instructions_text is None
                 and kind != "diagnostic"
@@ -254,7 +292,7 @@ def _embed_force_org_summary(payload):
     don't get it because the digest would be off-topic next to a rule
     definition.
     """
-    block = {"rules": _FORCE_ORG_SUMMARY, "see_also": "force_org_guidance"}
+    block = {"rules": _short_summary(), "see_also": "force_org_guidance"}
     if isinstance(payload, list):
         return {"results": payload, "force_org_summary": block}
     if isinstance(payload, dict):
@@ -278,7 +316,7 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     if with_auth is None:
         return FastMCP(
             "opr",
-            instructions=_HANDSHAKE_INSTRUCTIONS,
+            instructions=_handshake_instructions(),
             host=http_host(),
             port=http_port(),
         )
@@ -314,7 +352,7 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     )
     return FastMCP(
         "opr",
-        instructions=_HANDSHAKE_INSTRUCTIONS,
+        instructions=_handshake_instructions(),
         auth_server_provider=_auth_provider,
         auth=auth_settings,
         host=http_host(),
@@ -332,8 +370,10 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         version: str | None = None,
         ctx: Context | None = None,
     ) -> Any:
-        """FORCE ORG: For army-building requests, call ``force_org_guidance``
-        first and ``validate_army_list`` before finalizing.
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
 
         Free-text hybrid search across all ingested OPR rule chunks.
 
@@ -370,8 +410,10 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         include_rule_text: bool = False,
         ctx: Context | None = None,
     ) -> Any:
-        """FORCE ORG: For army-building requests, call ``force_org_guidance``
-        first and ``validate_army_list`` before finalizing.
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
 
         Look up an OPR unit by name. Returns full unit profile in one call.
 
@@ -431,8 +473,10 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         version: str | None = None,
         ctx: Context | None = None,
     ) -> Any:
-        """FORCE ORG: For army-building requests, call ``force_org_guidance``
-        first and ``validate_army_list`` before finalizing.
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
 
         Look up a single special rule by exact name (case-insensitive).
 
@@ -456,8 +500,10 @@ def _register_tools(mcp_obj: FastMCP) -> None:
 
     @mcp_obj.tool()
     def list_armies(ctx: Context | None = None) -> Any:
-        """FORCE ORG: For army-building requests, call ``force_org_guidance``
-        first and ``validate_army_list`` before finalizing.
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
 
         List every army present in the index, with document and unit counts.
         """
@@ -475,8 +521,10 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         include_rule_text: bool = False,
         ctx: Context | None = None,
     ) -> Any:
-        """FORCE ORG: For army-building requests, call ``force_org_guidance``
-        first and ``validate_army_list`` before finalizing.
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
 
         List all units for a given army (case-insensitive match on army name).
 
@@ -559,18 +607,29 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         units: list[dict],
         ctx: Context | None = None,
     ) -> dict:
-        """Check a proposed army list against the force-org rules.
+        """Check a proposed AoF / Grimdark Future army list against the
+        force-org rules.
 
-        Returns the mandatory pre-finalization checklist with computed
-        values and a pass/fail per rule. Calling this tool acknowledges
-        the force-org guidance for the session.
+        The four force-org rules are verified for AoF and GF only — do
+        not feed lists from other game systems (Firefight, Skirmish,
+        Quest, FTL) into this tool. Returns the mandatory
+        pre-finalization checklist with computed values and a pass/fail
+        per rule. Calling this tool acknowledges the force-org guidance
+        for the session.
+
+        IMPORTANT: ``copies`` is the NUMBER OF ROSTER COPIES of a unit
+        card you are bringing (default 1). Do NOT pass the unit card's
+        ``qty`` field here — that's the model count printed on the
+        card, which would make a 10-model Warriors unit count as 10
+        separate roster entries.
 
         Args:
             game_size_pts: Game size in points (G).
             units: List of unit entries. Each entry is a dict with keys:
-                ``unit_name`` (str), ``qty`` (int >= 1), ``total_pts``
-                (int; unit cost incl. upgrades, EXCL. attached hero),
-                ``attached_hero_name`` (str | None),
+                ``unit_name`` (str, required), ``total_pts`` (int,
+                required; unit cost incl. upgrades, EXCL. attached hero),
+                ``copies`` (int >= 1, default 1; number of roster copies
+                of this card), ``attached_hero_name`` (str | None),
                 ``attached_hero_pts`` (int | None; required when
                 ``attached_hero_name`` is set), ``attached_hero_tough``
                 (int | None; for the Tough(6) attachment-eligibility

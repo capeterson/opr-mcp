@@ -41,9 +41,11 @@ import opr_mcp.server as server_module
 from opr_mcp import indexing_status
 from opr_mcp.server import (
     _FORCE_ORG_SUMMARY,
+    _FORCE_ORG_SUMMARY_OVERRIDE_POINTER,
     _INSTRUCTIONS_RESOURCE_URI,
     _finalize,
     _load_instructions,
+    _short_summary,
     build_server,
 )
 
@@ -395,6 +397,10 @@ def test_handshake_instructions_advertises_dedicated_tool():
     assert isinstance(server.instructions, str)
     assert "force_org_guidance" in server.instructions
     assert "HEROES" in server.instructions
+    # Wording must be scoped to the systems the rules are verified for
+    # (AoF / Grimdark Future); other game systems served by the same
+    # tools must not be implicitly bound by them.
+    assert "AoF" in server.instructions or "Grimdark Future" in server.instructions
     # Short enough not to flood handshake-respecting clients.
     assert len(server.instructions) < 800
 
@@ -405,3 +411,65 @@ def test_resource_returns_full_instructions():
     """
     server = build_server()
     assert _INSTRUCTIONS_RESOURCE_URI in server._resource_manager._resources
+
+
+# ---------------------------------------------------------------------------
+# INSTRUCTIONS_FILE override must propagate to the short-summary channels,
+# otherwise the hardcoded AoF/GF rules contradict whatever custom guidance
+# the operator loaded.
+# ---------------------------------------------------------------------------
+
+
+def test_short_summary_is_default_when_no_override():
+    assert _short_summary() == _FORCE_ORG_SUMMARY
+
+
+def test_short_summary_degrades_to_pointer_when_override_set(monkeypatch, tmp_path):
+    custom = tmp_path / "custom.md"
+    custom.write_text("CUSTOM GUIDANCE BODY", encoding="utf-8")
+    monkeypatch.setenv("INSTRUCTIONS_FILE", str(custom))
+    assert _short_summary() == _FORCE_ORG_SUMMARY_OVERRIDE_POINTER
+
+
+def test_handshake_uses_override_pointer_when_INSTRUCTIONS_FILE_set(
+    monkeypatch, tmp_path
+):
+    """The handshake is built lazily inside ``_build_mcp`` so the
+    override takes effect at server-build time. Without the lazy build
+    the handshake would still advertise the hardcoded AoF/GF rules.
+    """
+    custom = tmp_path / "custom.md"
+    custom.write_text("CUSTOM GUIDANCE BODY", encoding="utf-8")
+    monkeypatch.setenv("INSTRUCTIONS_FILE", str(custom))
+    server = build_server()
+    assert _FORCE_ORG_SUMMARY_OVERRIDE_POINTER in server.instructions
+    # And the hardcoded digest must NOT appear (no contradiction).
+    assert "max floor(G/375)" not in server.instructions
+
+
+def test_reminder_uses_override_pointer_when_INSTRUCTIONS_FILE_set(
+    monkeypatch, tmp_path
+):
+    custom = tmp_path / "custom.md"
+    custom.write_text("CUSTOM GUIDANCE BODY", encoding="utf-8")
+    monkeypatch.setenv("INSTRUCTIONS_FILE", str(custom))
+    server_module._cached_instructions = None
+    indexing_status.mark_initial_completed()
+    ctx = _fake_ctx()
+    _finalize([{"a": 1}], ctx)  # consume first-call injection
+    out = _finalize([{"a": 2}], ctx)
+    assert out["force_org_reminder"] == _FORCE_ORG_SUMMARY_OVERRIDE_POINTER
+
+
+def test_embedded_summary_uses_override_pointer_when_INSTRUCTIONS_FILE_set(
+    monkeypatch, tmp_path
+):
+    custom = tmp_path / "custom.md"
+    custom.write_text("CUSTOM GUIDANCE BODY", encoding="utf-8")
+    monkeypatch.setenv("INSTRUCTIONS_FILE", str(custom))
+    server_module._cached_instructions = None
+    indexing_status.mark_initial_completed()
+    server = build_server()
+    ctx = _fake_ctx()
+    out = server._tool_manager._tools["list_armies"].fn(ctx=ctx)
+    assert out["force_org_summary"]["rules"] == _FORCE_ORG_SUMMARY_OVERRIDE_POINTER

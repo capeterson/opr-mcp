@@ -16,6 +16,13 @@ The output is shaped to match the "Mandatory pre-finalization checklist"
 section of ``instructions.md``: a per-rule pass/fail with computed
 values and a markdown rendering of the checklist itself, so the model
 can copy-paste it verbatim into its response.
+
+Input field names are deliberately distinct from the existing
+``list_units`` / ``lookup_unit`` unit-card schema to prevent footguns:
+the validator's ``copies`` is the number of roster copies of a unit
+card; the unit card's ``qty`` is the number of MODELS in one unit and
+must NOT be passed in unmapped (a 10-model Warriors unit being treated
+as 10 separate units would fail every cap on a legal list).
 """
 
 from __future__ import annotations
@@ -33,28 +40,60 @@ def _limits(game_size_pts: int) -> dict[str, int]:
     }
 
 
+def _validate_input(units: list[dict]) -> list[str]:
+    """Return a list of human-readable error strings for invalid entries.
+
+    Empty list means input is well-formed. The validator's math is
+    correct only on well-formed input — silently coercing missing or
+    non-positive values produces output that says ``passed: True`` for
+    lists the model couldn't fully verify, so we surface input problems
+    as a hard gate instead.
+    """
+    errors: list[str] = []
+    for i, e in enumerate(units):
+        label = e.get("unit_name") or f"entry[{i}]"
+        if not e.get("unit_name"):
+            errors.append(f"{label}: missing required field 'unit_name'")
+        if "total_pts" not in e:
+            errors.append(f"{label}: missing required field 'total_pts'")
+        copies = e.get("copies", 1)
+        try:
+            if int(copies) < 1:
+                errors.append(
+                    f"{label}: 'copies' must be >= 1 (got {copies!r})"
+                )
+        except (TypeError, ValueError):
+            errors.append(f"{label}: 'copies' must be an integer (got {copies!r})")
+        if e.get("attached_hero_name") and "attached_hero_pts" not in e:
+            errors.append(
+                f"{label}: 'attached_hero_pts' is required when "
+                "'attached_hero_name' is set"
+            )
+    return errors
+
+
 def _entry_unit_count(entry: dict) -> int:
     """How many units this entry contributes to the unit-count cap.
 
-    Each ``qty`` copy is one unit; an attached hero does NOT add an
-    extra unit (the combined formation is one). Standalone hero entries
-    still count their ``qty`` toward the unit count.
+    Each ``copies`` instance is one unit; an attached hero does NOT add
+    an extra unit (the combined formation is one). Standalone hero
+    entries still count their ``copies`` toward the unit count.
     """
-    return int(entry.get("qty", 1))
+    return int(entry.get("copies", 1))
 
 
 def _entry_hero_count(entry: dict) -> int:
     """How many heroes this entry contributes to the hero limit.
 
-    A standalone hero entry contributes ``qty``; an entry with an
-    attached hero contributes ``qty`` (one hero per attached formation).
-    A non-hero entry with no attachment contributes 0.
+    A standalone hero entry contributes ``copies``; an entry with an
+    attached hero contributes ``copies`` (one hero per attached
+    formation). A non-hero entry with no attachment contributes 0.
     """
-    qty = int(entry.get("qty", 1))
+    copies = int(entry.get("copies", 1))
     if entry.get("attached_hero_name"):
-        return qty
+        return copies
     if entry.get("is_hero"):
-        return qty
+        return copies
     return 0
 
 
@@ -62,7 +101,7 @@ def _entry_combined_cost(entry: dict) -> int:
     """Cost of a single instance of this entry for the cost-cap check.
 
     For attached-hero entries, this is unit cost + hero cost. The
-    ``qty`` field does NOT inflate this — the cap is per-unit, not
+    ``copies`` field does NOT inflate this — the cap is per-unit, not
     per-roster.
     """
     cost = int(entry.get("total_pts", 0))
@@ -120,6 +159,28 @@ def run(game_size_pts: int, units: list[dict]) -> dict[str, Any]:
     """Validate a proposed army list. See module docstring for input shape."""
     limits = _limits(game_size_pts)
 
+    input_errors = _validate_input(units)
+    if input_errors:
+        # Hard gate: return a failed INPUT_VALID check and skip the math.
+        # Nonsense inputs would otherwise produce ``passed: True`` for
+        # lists the validator couldn't actually verify.
+        return {
+            "game_size_pts": game_size_pts,
+            "limits": limits,
+            "computed": None,
+            "checks": [{
+                "rule": "INPUT_VALID",
+                "ok": False,
+                "detail": "; ".join(input_errors),
+            }],
+            "passed": False,
+            "errors": input_errors,
+            "checklist_markdown": (
+                "Input rejected — fix the errors below and resubmit:\n  "
+                + "\n  ".join(input_errors)
+            ),
+        }
+
     heroes_used = sum(_entry_hero_count(e) for e in units)
     total_unit_count = sum(_entry_unit_count(e) for e in units)
 
@@ -135,7 +196,7 @@ def run(game_size_pts: int, units: list[dict]) -> dict[str, Any]:
             else:
                 largest_unit_name = name
 
-    # Duplicates: group by unit_name, sum qty. Per the hero-attachment
+    # Duplicates: group by unit_name, sum copies. Per the hero-attachment
     # rule, a (hero + spearmen) entry counts as one spearmen for the
     # duplicate cap of the underlying non-hero unit. Standalone heroes
     # group under their own name like any other unit.
@@ -144,7 +205,7 @@ def run(game_size_pts: int, units: list[dict]) -> dict[str, Any]:
         name = e.get("unit_name", "")
         if not name:
             continue
-        dup_counter[name] += int(e.get("qty", 1))
+        dup_counter[name] += int(e.get("copies", 1))
     duplicates = [
         {"unit_name": n, "count": c}
         for n, c in sorted(dup_counter.items())
