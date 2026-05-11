@@ -178,8 +178,14 @@ Override the guidance by editing the bundled file or by setting
 
 Environment variables (all optional):
 
-- `DB` — path to the SQLite file. Default: `%LOCALAPPDATA%\opr-mcp\opr.db`
-  (Windows) or `~/.local/share/opr-mcp/opr.db` (Linux/macOS).
+- `DB` — path to the content SQLite file (rules, units, chunks, vectors).
+  Default: `%LOCALAPPDATA%\opr-mcp\opr.db` (Windows) or
+  `~/.local/share/opr-mcp/opr.db` (Linux/macOS).
+- `AUTH_DB` — path to the OAuth / Discord-token SQLite file. Kept separate
+  from `DB` so rebuilding the content DB to pick up parser changes doesn't
+  drop registered clients or issued tokens. Default: `auth.db` next to
+  `DB`. On first open, any OAuth tables left behind in a legacy content
+  DB are migrated across automatically.
 - `EMBED_MODEL` — override the embedding model. Must be 384-dim or you
   will need to rebuild the DB.
 - `EMBED_DEVICE` — torch device for the embedding model (`cpu`, `cuda`,
@@ -297,7 +303,7 @@ Notes:
 - Guild membership is checked at token-issue time only. Token TTL bounds the
   revocation lag — to evict everyone immediately, lower
   `AUTH_TOKEN_TTL`, or wipe both tables:
-  `sqlite3 opr.db "DELETE FROM oauth_access_tokens; DELETE FROM oauth_refresh_tokens;"`.
+  `sqlite3 auth.db "DELETE FROM oauth_access_tokens; DELETE FROM oauth_refresh_tokens;"`.
   Deleting only the access-token table leaves refresh tokens able to mint
   fresh access tokens, so don't skip the second statement.
 - With `AUTH_ENABLED` unset, `serve` behaves exactly as before (stdio,

@@ -105,6 +105,91 @@ def test_v1_db_rejects_with_actionable_error(tmp_path):
         db.open_db(p).close()
 
 
+def test_open_auth_db_creates_only_auth_tables(tmp_auth_db):
+    """Auth DB is the OAuth tables only — no content tables, no FTS, no vec."""
+    conn = db.open_auth_db(tmp_auth_db)
+    try:
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert {"oauth_clients", "oauth_access_tokens", "oauth_discord_tokens"}.issubset(tables)
+        assert "documents" not in tables
+        assert "chunks_vec" not in tables
+    finally:
+        conn.close()
+
+
+def test_open_auth_db_migrates_legacy_rows_from_content_db(tmp_path, monkeypatch):
+    """If the content DB still has OAuth tables with rows from before the split,
+    open_auth_db() should copy them into auth.db on first open."""
+    legacy = tmp_path / "opr.db"
+    auth = tmp_path / "auth.db"
+    monkeypatch.setenv("DB", str(legacy))
+    monkeypatch.setenv("AUTH_DB", str(auth))
+
+    # Stand up a legacy content DB with the old in-place auth tables and one row.
+    content_conn = db.open_db(legacy)
+    db.init_auth_schema(content_conn)
+    content_conn.execute(
+        "INSERT INTO oauth_clients (client_id, client_secret_enc, info_json, issued_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("client-legacy", None, '{"client_id":"client-legacy"}', 1700000000),
+    )
+    content_conn.commit()
+    content_conn.close()
+
+    auth_conn = db.open_auth_db(auth)
+    try:
+        row = auth_conn.execute(
+            "SELECT client_id, info_json FROM oauth_clients WHERE client_id = ?",
+            ("client-legacy",),
+        ).fetchone()
+        assert row is not None
+        assert row["client_id"] == "client-legacy"
+    finally:
+        auth_conn.close()
+
+
+def test_open_auth_db_does_not_overwrite_existing_rows(tmp_path, monkeypatch):
+    """Migration must be gated on the destination being empty — re-opening
+    auth.db when both files have data must not stomp the newer auth.db rows."""
+    legacy = tmp_path / "opr.db"
+    auth = tmp_path / "auth.db"
+    monkeypatch.setenv("DB", str(legacy))
+    monkeypatch.setenv("AUTH_DB", str(auth))
+
+    # Seed auth.db with the canonical row first.
+    auth_conn = db.open_auth_db(auth)
+    auth_conn.execute(
+        "INSERT INTO oauth_clients (client_id, client_secret_enc, info_json, issued_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("client-1", None, '{"client_id":"client-1","origin":"auth"}', 1700000001),
+    )
+    auth_conn.commit()
+    auth_conn.close()
+
+    # Then stand up a legacy DB with a *conflicting* row for the same client.
+    content_conn = db.open_db(legacy)
+    db.init_auth_schema(content_conn)
+    content_conn.execute(
+        "INSERT INTO oauth_clients (client_id, client_secret_enc, info_json, issued_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("client-1", None, '{"client_id":"client-1","origin":"legacy"}', 1700000000),
+    )
+    content_conn.commit()
+    content_conn.close()
+
+    # Re-open auth.db — migration must be skipped because oauth_clients is non-empty.
+    auth_conn = db.open_auth_db(auth)
+    try:
+        info = auth_conn.execute(
+            "SELECT info_json FROM oauth_clients WHERE client_id = ?", ("client-1",)
+        ).fetchone()["info_json"]
+        assert '"origin":"auth"' in info
+    finally:
+        auth_conn.close()
+
+
 def test_fts_triggers_keep_index_in_sync(tmp_db):
     conn = db.open_db(tmp_db)
     conn.execute(

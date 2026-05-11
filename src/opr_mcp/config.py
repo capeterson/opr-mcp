@@ -24,6 +24,19 @@ def db_path() -> Path:
     return Path(user_data_dir(APP_NAME, appauthor=False)) / "opr.db"
 
 
+def auth_db_path() -> Path:
+    """Path to the separate OAuth / Discord-token database.
+
+    Kept in its own file so a content-DB rebuild (e.g. to pick up parser
+    changes) doesn't drop registered clients, issued tokens, or stashed
+    Discord refresh tokens. Defaults to ``auth.db`` next to the content DB.
+    """
+    env = os.environ.get("AUTH_DB")
+    if env:
+        return Path(env).expanduser()
+    return db_path().parent / "auth.db"
+
+
 def embed_model_name() -> str:
     return os.environ.get("EMBED_MODEL", DEFAULT_EMBED_MODEL)
 

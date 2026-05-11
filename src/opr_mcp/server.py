@@ -169,9 +169,10 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     from .auth.discord_provider import DiscordOAuthProvider
     from .auth.storage import AuthStorage
 
-    conn = _db()
-    db.init_auth_schema(conn)
-    store = AuthStorage(conn, fernet_key_secret=with_auth.auth_secret)
+    # Auth lives in its own SQLite file (auth.db) so rebuilding the content DB
+    # for parser changes doesn't drop registered clients or issued tokens.
+    auth_conn = db.open_auth_db()
+    store = AuthStorage(auth_conn, fernet_key_secret=with_auth.auth_secret)
     global _auth_provider
     _auth_provider = DiscordOAuthProvider(with_auth, store)
 
