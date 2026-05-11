@@ -74,7 +74,9 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
     path = path.resolve()
     digest = sha256_file(path)
 
-    # --- read phase: cheap queries to decide whether to proceed ---
+    # --- read phase: cheap queries to decide whether to proceed. These are
+    # advisory — the world may change before the write phase acquires the
+    # write lock, so the same checks are repeated under the lock below.
     existing = conn.execute(
         "SELECT id, sha256 FROM documents WHERE filename = ? OR path = ?",
         (path.name, str(path)),
@@ -83,24 +85,6 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
         log.info("Skipping unchanged %s", path.name)
         stats.skipped += 1
         return stats
-
-    if not existing:
-        # Same content already ingested under a different name — e.g. an
-        # orphan left over from a Forge filename-format change, or a manually
-        # duplicated PDF. Treat as a no-op rather than tripping the
-        # UNIQUE(sha256) constraint; the caller can clean up the duplicate
-        # file at their leisure.
-        duplicate = conn.execute(
-            "SELECT filename FROM documents WHERE sha256 = ?",
-            (digest,),
-        ).fetchone()
-        if duplicate:
-            log.info(
-                "Skipping %s: identical content already ingested as %s",
-                path.name, duplicate["filename"],
-            )
-            stats.skipped += 1
-            return stats
 
     meta = detect_metadata(path)
     pages = page_count(path)
@@ -156,119 +140,161 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
 
     # --- write phase: all DB mutations in a single tight transaction so the
     # write lock is held only for the time it takes to run the INSERTs.
-    if existing:
-        _delete_existing(conn, existing["id"])
+    #
+    # BEGIN IMMEDIATE up front so concurrent ingest workers serialize here
+    # rather than racing through the doc-existence / duplicate-sha checks
+    # in parallel. The parse phase ran without the lock, so another writer
+    # may have committed in the meantime — re-read state inside the lock
+    # before deciding what to do.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        current = conn.execute(
+            "SELECT id, sha256 FROM documents WHERE filename = ? OR path = ?",
+            (path.name, str(path)),
+        ).fetchone()
+        if current and current["sha256"] == digest:
+            log.info(
+                "Skipping %s: identical content already ingested",
+                path.name,
+            )
+            stats.skipped += 1
+            conn.rollback()
+            return stats
 
-    cur = conn.execute(
-        """
-        INSERT INTO documents (path, filename, sha256, game_system, title, army, version, page_count, ingested_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            str(path),
-            path.name,
-            digest,
-            meta["game_system"],
-            meta["title"],
-            meta["army"],
-            version,
-            pages,
-            dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
-        ),
-    )
-    doc_id = cur.lastrowid
+        # Same bytes under a different filename — e.g. an orphan left over
+        # from a Forge filename-format change, or another worker that beat
+        # us in. Skip cleanly rather than tripping UNIQUE(sha256). We check
+        # *before* deleting our own stale row so we don't drop data only to
+        # discover we can't replace it.
+        duplicate = conn.execute(
+            "SELECT filename FROM documents WHERE sha256 = ?",
+            (digest,),
+        ).fetchone()
+        if duplicate:
+            log.info(
+                "Skipping %s: identical content already ingested as %s",
+                path.name, duplicate["filename"],
+            )
+            stats.skipped += 1
+            conn.rollback()
+            return stats
 
-    chunk_ids: list[int] = []
-    for c in chunks:
+        if current:
+            _delete_existing(conn, current["id"])
+
         cur = conn.execute(
             """
-            INSERT INTO chunks (document_id, page, section_type, section_title, text, token_count)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (doc_id, c.page, c.section_type, c.section_title, c.text, c.token_count),
-        )
-        chunk_ids.append(cur.lastrowid)
-
-    for cid, blob in zip(chunk_ids, chunk_blobs, strict=True):
-        conn.execute(
-            "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
-            (cid, blob),
-        )
-
-    def _anchor(sec_i: int) -> int | None:
-        idx = first_chunk_idx_per_section.get(sec_i)
-        return chunk_ids[idx] if idx is not None else None
-
-    units_added = 0
-    upgrades_added = 0
-    for sec_i, u, groups in parsed_units:
-        cur = conn.execute(
-            """
-            INSERT INTO units (document_id, chunk_id, army, name, qty, quality, defense,
-                               base_points, equipment_json, rules_json, raw_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO documents (path, filename, sha256, game_system, title, army, version, page_count, ingested_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                doc_id,
-                _anchor(sec_i),
-                meta["army"] or "Unknown",
-                u.name,
-                u.qty,
-                u.quality,
-                u.defense,
-                u.base_points,
-                equipment_json(u.equipment),
-                rules_json(u.rules),
-                u.raw_text,
+                str(path),
+                path.name,
+                digest,
+                meta["game_system"],
+                meta["title"],
+                meta["army"],
+                version,
+                pages,
+                dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
             ),
         )
-        units_added += 1
-        unit_id = cur.lastrowid
+        doc_id = cur.lastrowid
 
-        for gi, group in enumerate(groups):
-            for oi, opt in enumerate(group.options):
-                conn.execute(
-                    """
-                    INSERT INTO unit_upgrades (
-                        document_id, unit_id, group_index, group_kind,
-                        option_index, option_text, points_cost, raw_text
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        doc_id,
-                        unit_id,
-                        gi,
-                        group.kind,
-                        oi,
-                        opt.text,
-                        opt.points_cost,
-                        u.raw_text,
-                    ),
-                )
-                upgrades_added += 1
-
-    rules_added = 0
-    rule_scope = "core" if meta["army"] is None else f"army:{meta['army']}"
-    for sec_i, rules in parsed_rules:
-        anchor = _anchor(sec_i)
-        for r in rules:
-            conn.execute(
+        chunk_ids: list[int] = []
+        for c in chunks:
+            cur = conn.execute(
                 """
-                INSERT INTO special_rules (document_id, chunk_id, name, parametric, scope, description)
+                INSERT INTO chunks (document_id, page, section_type, section_title, text, token_count)
                 VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (doc_id, c.page, c.section_type, c.section_title, c.text, c.token_count),
+            )
+            chunk_ids.append(cur.lastrowid)
+
+        for cid, blob in zip(chunk_ids, chunk_blobs, strict=True):
+            conn.execute(
+                "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+                (cid, blob),
+            )
+
+        def _anchor(sec_i: int) -> int | None:
+            idx = first_chunk_idx_per_section.get(sec_i)
+            return chunk_ids[idx] if idx is not None else None
+
+        units_added = 0
+        upgrades_added = 0
+        for sec_i, u, groups in parsed_units:
+            cur = conn.execute(
+                """
+                INSERT INTO units (document_id, chunk_id, army, name, qty, quality, defense,
+                                   base_points, equipment_json, rules_json, raw_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     doc_id,
-                    anchor,
-                    r.name,
-                    1 if r.parametric else 0,
-                    rule_scope,
-                    r.description,
+                    _anchor(sec_i),
+                    meta["army"] or "Unknown",
+                    u.name,
+                    u.qty,
+                    u.quality,
+                    u.defense,
+                    u.base_points,
+                    equipment_json(u.equipment),
+                    rules_json(u.rules),
+                    u.raw_text,
                 ),
             )
-            rules_added += 1
+            units_added += 1
+            unit_id = cur.lastrowid
 
-    conn.commit()
+            for gi, group in enumerate(groups):
+                for oi, opt in enumerate(group.options):
+                    conn.execute(
+                        """
+                        INSERT INTO unit_upgrades (
+                            document_id, unit_id, group_index, group_kind,
+                            option_index, option_text, points_cost, raw_text
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            doc_id,
+                            unit_id,
+                            gi,
+                            group.kind,
+                            oi,
+                            opt.text,
+                            opt.points_cost,
+                            u.raw_text,
+                        ),
+                    )
+                    upgrades_added += 1
+
+        rules_added = 0
+        rule_scope = "core" if meta["army"] is None else f"army:{meta['army']}"
+        for sec_i, rules in parsed_rules:
+            anchor = _anchor(sec_i)
+            for r in rules:
+                conn.execute(
+                    """
+                    INSERT INTO special_rules (document_id, chunk_id, name, parametric, scope, description)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        doc_id,
+                        anchor,
+                        r.name,
+                        1 if r.parametric else 0,
+                        rule_scope,
+                        r.description,
+                    ),
+                )
+                rules_added += 1
+
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
     stats.documents += 1
     stats.chunks += len(chunks)

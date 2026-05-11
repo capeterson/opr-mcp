@@ -97,6 +97,37 @@ def test_ingest_skips_byte_identical_duplicate_under_different_name(tmp_db, tmp_
     assert n_docs == 1
 
 
+def _make_pdf_with_text(path: Path, text: str) -> Path:
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((50, 60), text, fontsize=11)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_ingest_replacement_skips_when_new_bytes_match_other_doc(tmp_db, tmp_path):
+    # Regression: a tracked PDF whose bytes get replaced with the content of
+    # another already-ingested PDF must not drop its DB row only to then
+    # discover it can't insert the replacement (UNIQUE(sha256) belongs to
+    # the other doc). The pre-write duplicate-sha check has to consider
+    # already-tracked filenames before the _delete_existing call.
+    a = _make_pdf_with_text(tmp_path / "a.pdf", "Content A.")
+    b = _make_pdf_with_text(tmp_path / "b.pdf", "Content B.")
+    conn = db.open_db(tmp_db)
+    ingest_pdf(conn, a)
+    ingest_pdf(conn, b)
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 2
+
+    # a.pdf's bytes get replaced with b.pdf's bytes — same sha as b's row.
+    a.write_bytes(b.read_bytes())
+    s = ingest_pdf(conn, a)
+    assert s.documents == 0 and s.skipped == 1
+    # Both rows still present; nothing got dropped.
+    rows = conn.execute("SELECT filename FROM documents ORDER BY filename").fetchall()
+    assert [r["filename"] for r in rows] == ["a.pdf", "b.pdf"]
+
+
 def test_search_rules_finds_content(ingested_db):
     results = search_rules.run(ingested_db, "how does Tough work")
     assert results, "expected at least one result"
