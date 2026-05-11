@@ -1,85 +1,66 @@
-# OPR MCP server
-
-This server indexes One Page Rules (OPR) army books and core rules for
-Grimdark Future, Age of Fantasy, Firefight, and the skirmish variants.
-
 ## Force organization rules — read this before building lists
 
-When the user asks you to build, edit, or validate an army list, you
-MUST first look up the force organization rules for the relevant game
-system before proposing units. Force-org rules cap things like the
-number of Hero units, the ratio of Heroes to non-Hero units, duplicate
-unit limits, and combined-unit eligibility — lists that ignore them are
-illegal.
+When the user asks you to build, edit, or validate an army list, the
+optional force-organization rules below are a HARD CONSTRAINT unless
+the user has said "ignore force org", "narrative list", or similar.
 
-Unless the user has explicitly said "ignore force org", "narrative
-list", or similar, treat compliance as a hard requirement, and flag
-any user request that would violate a limit.
+The rules are identical across AoF and GF (verified in both core
+rulebooks). They are short — memorize them, do NOT rely on
+`search_rules` to surface them, because the upgrade-table chunks can
+truncate mid-list:
+
+For a game of size G points:
+
+  1. HEROES         max ⌊G / 375⌋ hero units
+  2. DUPLICATES     max (1 + ⌊G / 750⌋) copies of the same unit
+                    (combined units count as one)
+  3. UNIT COST CAP  no single unit worth more than 35% of G
+  4. UNIT COUNT CAP max ⌊G / 150⌋ units total
+
+Worked example at G = 750:
+  - max 2 heroes
+  - max 2 of the same unit
+  - max 262.5 pts per unit
+  - max 5 units total
 
 ## Heroes attached to units
 
 When a Hero "joins" or is attached to a non-Hero unit at deployment,
-the combined formation counts as a SINGLE unit and a SINGLE activation
-— NOT two. Do not count an attached Hero as a separate unit or
-separate activation when validating list legality or pacing turn
-order.
+the combined formation is ONE unit for every force-org check AND one
+activation in play. This applies to:
 
-## Point costs — use the structured tool, not free-text search
+  - UNIT COUNT CAP (rule 4): hero + attached unit = 1 unit, not 2
+  - UNIT COST CAP (rule 3): the cap applies to the COMBINED point
+    cost of hero + unit + all upgrades, NOT to each separately. A
+    140-pt hero attached to a 175-pt unit is a 315-pt unit for the
+    35% check.
+  - DUPLICATES (rule 2): the combined formation counts as one toward
+    the duplicate limit of the underlying non-hero unit
+  - ACTIVATIONS: one activation in the turn order
 
-Point costs for unit upgrades come from `lookup_unit`, which returns
-each unit's `upgrade_groups` — a list of structured (option text,
-points) pairs parsed from the army book's upgrade tables. Do NOT use
-`search_rules` to answer cost questions — `search_rules` returns
-free-text chunks of mangled upgrade-table layout where the pairing
-between an option and its `+Npts` line is unreliable.
+A Tough(6) hero is the cap for attachment eligibility (core Hero
+rule). Higher Tough heroes cannot attach and always count as their
+own unit.
 
-Point costs are NOT portable across game systems. The same unit name
-in AoF (Age of Fantasy), AoFR (Regiments), AoFS (Skirmish), AoFQ
-(Quest), GF (Grimdark Future), and GFF (Firefight) has different
-costs because each game system has its own point scale. Always pass
-`game_system=` when answering a cost question if the user has
-mentioned (or implied) a specific game. If the user hasn't, ask before
-proposing a number, or surface the cost from every game system in the
-result.
+## Mandatory pre-finalization checklist
 
-## Recommended list-building workflow
+Before returning any list, produce this checklist verbatim with
+filled-in values and a ✓ or ✗ for each line. If any line is ✗, fix
+the list before showing it to the user — do not present an illegal
+list with a caveat.
 
-1. Call `search_rules` with a query like `"force organization"` or
-   `"army composition"`, filtered by the relevant `game_system`
-   (`"gf"`, `"aof"`, `"gff"`, `"skirmish"`), to retrieve the limits.
-2. Use `list_units(army=...)` for a quick roster, or
-   `list_units(army=..., details=True)` to pull a whole army's full
-   profiles (stats + equipment + rules + `upgrade_groups`) in a single
-   call.
-3. Use `lookup_unit(name=..., army=..., game_system=...)` for one
-   specific unit when you don't need the whole roster — it returns
-   stats, equipment, named rules, and `upgrade_groups` (option text +
-   exact point cost) in one call.
-4. Use `get_special_rule` for any rule the user names (e.g. `"Tough"`,
-   `"Hero"`). If you'll be inspecting many rules on a single unit,
-   pass `include_rule_text=True` to `lookup_unit` (or
-   `list_units(details=True)`) instead — it inlines descriptions on
-   each unit's `rules` list and skips the per-rule round trip.
-5. Before returning the final list, re-check it against the limits from
-   step 1 and flag any violation.
+  Game size:           ___ pts
+  Heroes used:         ___ / ⌊G/375⌋
+  Largest unit cost:   ___ pts / ⌊0.35 × G⌋ pts  (combined w/ attached hero)
+  Total unit count:    ___ / ⌊G/150⌋             (combined units = 1)
+  Any duplicates:      list them, each ≤ (1 + ⌊G/750⌋)
+  Hero attachments:    list each as "Hero (X pts) + Unit (Y pts) = Z pts"
 
-## Tool selection guidance
+## Tool-call hygiene for force-org
 
-- Prefer `lookup_unit` over `search_rules` when the user names a
-  specific unit. `lookup_unit` returns both stats and upgrade costs in
-  a single call.
-- Prefer `list_units(details=True)` over many `lookup_unit` calls when
-  the user wants to scan or compare a whole army.
-- Prefer `get_special_rule` when the user names a single rule, or use
-  `include_rule_text=True` on the unit lookups to skip the chase
-  entirely.
-- Tool responses may include an `indexing` block while the index is
-  still being built — surface that warning rather than treating empty
-  results as authoritative.
-- An empty `upgrade_groups` for a known unit can mean either (a) the
-  unit genuinely has no upgrade options in that book, or (b) the index
-  was built before structured-upgrade extraction was enabled and the
-  operator hasn't reingested yet. If (b) seems likely, fall back to
-  `search_rules` *only* to surface the upgrade text verbatim, and warn
-  the user that the costs you cite haven't been cross-checked against
-  a structured table.
+- DO NOT use `search_rules` to fetch the force-org rules — the
+  bullets often truncate. The four rules above are authoritative.
+- If you need other composition details (sideboarding, multi-faction,
+  team play), THEN use `search_rules` and read the FULL chunk,
+  treating bullet lists ending without explanatory text as suspect
+  and re-querying for a continuation.
