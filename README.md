@@ -1,9 +1,12 @@
 # opr-mcp
 
-Local MCP server that indexes [One Page Rules](https://onepagerules.com/) PDFs and exposes
-hybrid (BM25 + vector) lookup tools to Claude. Fully offline, no API keys, no scraping.
-You drop your purchased OPR PDFs in a folder, run `opr-mcp ingest`, and Claude gains tools
-to answer rules questions, look up unit stats, and resolve special rules.
+Local MCP server for [One Page Rules](https://onepagerules.com/). Out of the
+box it syncs structured army-roster data (units, weapons, upgrade options,
+costs) from the [Army Forge](https://army-forge.onepagerules.com/) JSON API
+and exposes hybrid (BM25 + vector) lookup tools to Claude. Drop your own
+advanced-rules / lore PDF into the watched directory for full-text rules
+search, and Claude can answer rules questions, look up unit stats, and
+resolve special rules — fully offline once synced, no API keys.
 
 ## Status
 
@@ -27,78 +30,25 @@ extension loading **disabled**, which makes `sqlite-vec` unloadable. If you see
 First run downloads the `BAAI/bge-small-en-v1.5` embedding model (~130 MB) to the
 HuggingFace cache.
 
-## Ingest
+## Quick start
 
 ```bash
-uv run opr-mcp ingest /path/to/your/opr-pdfs/
-uv run opr-mcp list
-uv run opr-mcp stats
+uv run opr-mcp serve --pdf-dir /path/to/your/opr-pdfs/
 ```
 
-Re-running on an unchanged file is a no-op (SHA-256 hashed). If a file has changed,
-its old rows are deleted and it is re-ingested.
+That's it. The server:
 
-```bash
-uv run opr-mcp remove core.pdf       # remove one document
-uv run opr-mcp reingest               # re-process every document at its known path
-```
+- starts on stdio, ready for Claude Desktop / Claude Code,
+- runs an immediate Army Forge JSON scan and a 12-hour background re-scan to
+  populate `units` / `unit_upgrades`,
+- ingests any PDFs it finds under `--pdf-dir` and watches the directory for
+  changes (drop in your advanced-rules / lore PDF — that's the recommended
+  use of this directory now that roster data comes from Forge JSON).
 
-## Auto-fetch from Army Forge
-
-`opr-mcp` can also pull army-book PDFs directly from OPR's
-[Army Forge](https://army-forge.onepagerules.com/) listing API, mirror them
-into the watched PDF directory, and refresh them when OPR regenerates a
-book. Useful if you want to avoid hand-curating the corpus.
-
-```bash
-# One-shot scan: enumerate every (book, game-system) pair, resolve the current
-# PDF, download anything that's new or whose renderId has changed since last
-# scan, and stash it under the configured forge directory.
-uv run opr-mcp forge-scan
-```
-
-Background mode runs the same scan on an interval inside `serve`:
-
-```bash
-PDF_DIR=/path/to/your/opr-pdfs \
-  uv run opr-mcp serve --forge-sync
-```
-
-`--forge-sync` (or `FORGE_SYNC=1`) starts a daemon thread that scans every
-12 hours by default and writes new/changed PDFs into `<PDF_DIR>/forge/`. The
-recursive watcher already running on `PDF_DIR` picks them up and feeds them
-through the normal ingest pipeline.
-
-How change detection works: the PDF URL embeds a rotating `renderId` nanoid
-that flips whenever a book is regenerated (`army-books/pdfs/<uid>~<gs>/<renderId>.pdf`).
-A scan compares each pair's current `renderId` against what was recorded in
-the local `forge_books` table; only differing ones get downloaded.
-
-### Forge env vars (all optional)
-
-- `FORGE_SYNC` — opt-in flag for the background scheduler in `serve`.
-  Truthy values: `1`, `true`, `yes`, `on`. Default: off.
-- `FORGE_INTERVAL_SECONDS` — scheduler interval. Default: `43200`
-  (12 hours). Minimum: 60.
-- `FORGE_FILTERS` — `official`, `community`, or both
-  (comma-separated). Default: `official`. The community catalog is large
-  (thousands of books); enable it deliberately.
-- `FORGE_GAMES` — comma-separated game-system slugs or numeric IDs
-  to scan. Default: `gf,aof` (the two flagship systems). Set to `all`
-  to opt back into every known system
-  (`ftl,gf,gff,aof,aofs,aofr,aofq,aofqai,gfsq,gfsqai`), or list slugs
-  explicitly for a custom subset. A book contributes one PDF per
-  game-system in its `enabledGameSystems` intersected with this list.
-  Note: the cleanup sweeper also honors this value — if you upgrade
-  from a release that defaulted to "all", running cleanup will prune
-  any locally-mirrored books for systems no longer in scope. Set
-  `FORGE_GAMES=all` (or pass `--all-systems` to `opr-mcp cleanup`)
-  to keep them.
-- `FORGE_PDF_DIR` — explicit destination. Default precedence:
-  `<PDF_DIR>/forge` if `PDF_DIR` is set, otherwise a `forge-pdfs` folder
-  under the platform user data dir.
-
-## Use with Claude
+PDFs from Forge are **not** downloaded by default; the JSON detail alone
+covers unit / upgrade lookups. Set `FORGE_DOWNLOAD_PDFS=true` (or pass
+`--forge-download-pdfs`) to additionally mirror army-book PDFs for full-text
+search.
 
 Add to your Claude Desktop / Claude Code MCP config:
 
@@ -109,11 +59,70 @@ Add to your Claude Desktop / Claude Code MCP config:
       "command": "uv",
       "args": ["run", "opr-mcp", "serve"],
       "cwd": "/absolute/path/to/opr-mcp",
-      "env": { "DB": "/absolute/path/to/opr.db" }
+      "env": { "DB_PATH": "/absolute/path/to/opr.db" }
     }
   }
 }
 ```
+
+## Army Forge sync
+
+The Forge JSON API is the canonical source for army-roster data. With
+`FORGE_SYNC=true` (the default), `serve` runs an immediate one-shot scan
+at startup and a background re-scan every `FORGE_INTERVAL_SECONDS` (12h
+by default), keeping `units` and `unit_upgrades` in sync with whatever
+OPR has published.
+
+`FORGE_DOWNLOAD_PDFS=true` (off by default) additionally mirrors every
+army-book PDF into `<PDF_DIR>/forge/` so the watcher can index the full
+text — useful for `search_rules` over army-book prose that isn't captured
+in the structured JSON. The PDFs are large; only opt in if you need it.
+
+A one-shot scan is also available via the CLI:
+
+```bash
+# JSON only:
+uv run opr-mcp forge-scan
+
+# JSON + PDF mirror:
+uv run opr-mcp forge-scan --download-pdfs
+```
+
+How change detection works: every listing entry carries a `modifiedAt`
+timestamp. A scan compares it to the per-pair value the local DB recorded
+on the previous scan — only pairs whose `modifiedAt` advanced trigger a
+fresh JSON detail fetch. PDF mirroring (when enabled) adds a parallel
+check on the PDF's rotating `renderId` nanoid.
+
+See the [Configuration](#configuration) section for all `FORGE_*` env
+vars (interval, filters, scope, destination directory, rate limit).
+
+## PDF ingest
+
+`PDF_DIR` (default `/pdf`) is where you drop your own PDFs — typically the
+**advanced rules** or other lore documents you want full-text search over.
+Every PDF under that directory is ingested at startup and the directory is
+watched for changes while the server runs; SHA-256 dedup makes re-ingesting
+unchanged files a no-op. The directory is created if it does not exist.
+
+Roster data (unit stats, weapons, upgrade groups) does **not** require any
+PDFs in `PDF_DIR` — it comes from the Forge JSON sync. PDF unit-block
+parsing exists as a fallback (toggle via `PDF_PARSE_UNIT_BLOCKS=true`)
+for books that aren't on Forge; the JSON path is more reliable when
+available.
+
+```bash
+# Manual ingest of a file or directory:
+uv run opr-mcp ingest /path/to/your/opr-pdfs/
+
+# Inspect / manage:
+uv run opr-mcp list
+uv run opr-mcp stats
+uv run opr-mcp remove core.pdf      # remove one document
+uv run opr-mcp reingest              # re-process every document at its known path
+```
+
+## Use with Claude
 
 Tools exposed:
 
@@ -176,34 +185,75 @@ Override the guidance by editing the bundled file or by setting
 
 ## Configuration
 
-Environment variables (all optional):
+All configuration is via environment variables. See [`.env.example`](.env.example)
+for a copyable template. Names are grouped by feature; intervals carry an
+explicit `_SECONDS` suffix.
 
-- `DB` — path to the content SQLite file (rules, units, chunks, vectors).
-  Default: `%LOCALAPPDATA%\opr-mcp\opr.db` (Windows) or
-  `~/.local/share/opr-mcp/opr.db` (Linux/macOS).
-- `AUTH_DB` — path to the OAuth / Discord-token SQLite file. Kept separate
-  from `DB` so rebuilding the content DB to pick up parser changes doesn't
-  drop registered clients or issued tokens. Default: `auth.db` next to
-  `DB`. On first open, any OAuth tables left behind in a legacy content
-  DB are migrated across automatically.
-- `EMBED_MODEL` — override the embedding model. Must be 384-dim or you
-  will need to rebuild the DB.
-- `EMBED_DEVICE` — torch device for the embedding model (`cpu`, `cuda`,
-  `mps`). Default: `cpu`.
-- `LOG_LEVEL` — `INFO` by default.
-- `PDF_DIR` — directory of PDFs ingested at startup and watched while the
-  server runs; the index is updated automatically when PDFs are added,
-  changed, or removed. The directory is created if it does not exist.
-  Default: `/pdf`.
-- `INSTRUCTIONS_FILE` — path to a markdown file whose contents are
-  auto-injected into the first tool response per MCP session (read once
-  per process). When unset, the bundled `src/opr_mcp/instructions.md` is
-  used. Point this at your own copy to customise the full guidance
-  clients see (e.g. relaxing the force-org-compliance default for
-  narrative-play deployments).
-- Army Forge auto-fetch: see the
-  [Auto-fetch from Army Forge](#auto-fetch-from-army-forge) section above for
-  `FORGE_*` variables.
+### Core paths & logging
+
+| Name | Default | Purpose |
+|---|---|---|
+| `DB_PATH` | platform user data dir + `/opr.db` | Content SQLite file (rules, units, chunks, vectors). |
+| `AUTH_DB_PATH` | `auth.db` next to `DB_PATH` | OAuth / Discord-token SQLite file. Kept separate so rebuilding the content DB doesn't drop registered clients or issued tokens. On first open, OAuth tables left in a legacy content DB are migrated across automatically. |
+| `LOG_LEVEL` | `INFO` | Standard Python logging level. |
+| `INSTRUCTIONS_FILE` | bundled `instructions.md` | Override the markdown injected into the first tool response per MCP session. |
+
+### HTTP server
+
+Only relevant when running with `--transport http` or `AUTH_ENABLED=true`.
+
+| Name | Default | Purpose |
+|---|---|---|
+| `SERVER_HOST` | `127.0.0.1` | HTTP bind host. Overridable per-invocation with `--host`. |
+| `SERVER_PORT` | `8765` | HTTP bind port. Overridable per-invocation with `--port`. |
+
+### PDF ingest
+
+| Name | Default | Purpose |
+|---|---|---|
+| `PDF_DIR` | `/pdf` | Directory of user-supplied PDFs (typically the advanced-rules PDF). Ingested at startup, watched for changes, created if missing. Forge PDF mirror lands at `<PDF_DIR>/forge/` when `FORGE_DOWNLOAD_PDFS=true`. |
+| `PDF_PARSE_UNIT_BLOCKS` | `false` | Have the PDF parser also write to `units` / `unit_upgrades`. Off by default — Forge JSON is the canonical source. Turn on as a fallback for books not on Forge. |
+
+### Embeddings
+
+| Name | Default | Purpose |
+|---|---|---|
+| `EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Override the embedding model. Must produce 384-dim vectors or you'll need to rebuild the DB. |
+| `EMBED_DEVICE` | `cpu` | Torch device for the embedding model: `cpu`, `cuda`, `mps`. |
+
+### Forge sync
+
+| Name | Default | Purpose |
+|---|---|---|
+| `FORGE_SYNC` | `true` | Run the JSON detail sync (immediate one-shot at startup + background loop). Set to `false` / `0` / `no` / `off` to disable. |
+| `FORGE_DOWNLOAD_PDFS` | `false` | Additionally download every army-book PDF into `<PDF_DIR>/forge/` for full-text indexing. JSON detail is always synced; this is the opt-in mirror leg. |
+| `FORGE_INTERVAL_SECONDS` | `43200` (12h) | Background scheduler interval. Minimum 60. |
+| `FORGE_FILTERS` | `official` | Comma-separated: `official`, `community`, or both. The community catalog is large (thousands of books); enable deliberately. |
+| `FORGE_GAMES` | `gf,aof` | Comma-separated game-system slugs or numeric IDs. Use `all` to opt in to every known system (`ftl,gf,gff,aof,aofs,aofr,aofq,aofqai,gfsq,gfsqai`). The cleanup sweeper also honors this — content for systems out of scope is pruned. |
+| `FORGE_PDF_DIR` | `<PDF_DIR>/forge` if `PDF_DIR` set, else `forge-pdfs` under user data dir | Explicit destination for downloaded PDFs (only used when `FORGE_DOWNLOAD_PDFS=true`). |
+| `FORGE_MIN_REQUEST_INTERVAL_SECONDS` | `3.0` | Minimum spacing between outbound Forge / CDN requests. The shared rate limiter applies to listing, `/pdf` resolve, detail fetch, and CDN download. |
+
+### Retention
+
+| Name | Default | Purpose |
+|---|---|---|
+| `CLEANUP_INTERVAL_SECONDS` | `86400` (24h) | How often the retention sweeper runs. Prunes Forge content that's out of `FORGE_GAMES` scope and trims old historical render versions. Only active when `FORGE_SYNC=true`. Minimum 60. |
+
+### Auth (Discord OAuth)
+
+Required only when running as a remote HTTP server. See
+[Remote deployment](#remote-deployment-with-discord-oauth).
+
+| Name | Default | Purpose |
+|---|---|---|
+| `AUTH_ENABLED` | `false` | Enable Discord OAuth 2.1 authentication for the HTTP transport. |
+| `AUTH_PUBLIC_URL` | (required) | Public-facing URL of this server. Must be `https://` (plain `http://` only allowed for `localhost` / `127.0.0.1`). |
+| `AUTH_SECRET` | (required) | Encryption secret for tokens. Generate with `python -c 'import secrets; print(secrets.token_urlsafe(48))'`. |
+| `AUTH_TOKEN_TTL_SECONDS` | `3600` (1h) | Access token lifetime. |
+| `AUTH_REFRESH_TOKEN_TTL_SECONDS` | `2592000` (30d) | Refresh token lifetime. |
+| `DISCORD_CLIENT_ID` | (required) | Discord application Client ID. |
+| `DISCORD_CLIENT_SECRET` | (required) | Discord application Client Secret. |
+| `DISCORD_GUILD_ID` | (required) | Discord server (guild) whose members are allowed to authenticate. |
 
 ## Docker
 
@@ -219,25 +269,29 @@ docker run --rm -i \
 
 The container mounts:
 
-- `/pdf` — your PDF corpus. Ingested on startup and re-ingested automatically
-  on file changes. Must be writable when `FORGE_SYNC=1`, since downloads land
-  in `/pdf/forge/`.
-- `/data/db` — SQLite index. Persist this volume to avoid re-ingesting.
+- `/pdf` — your user-supplied PDF corpus (e.g. the advanced-rules PDF). Ingested
+  on startup and re-ingested automatically on file changes. Forge PDF mirror
+  (when `FORGE_DOWNLOAD_PDFS=1`) lands in `/pdf/forge/`, so the volume must be
+  writable in that case.
+- `/data/db` — SQLite index. Persist this volume to avoid re-ingesting and
+  re-syncing Forge JSON on every container restart.
 - `/data/hf-cache` — HuggingFace cache for the embedding model. Persist to
   avoid re-downloading the ~130 MB model on every container restart.
 
-The default `CMD` is `serve`, which ingests `/pdf` on startup and watches it
-for changes while the server runs. To use it with Claude Desktop / Claude
-Code, point your MCP config at `docker run … ghcr.io/capeterson/opr-mcp:dev`.
+The default `CMD` is `serve`, which ingests `/pdf` on startup, watches it
+for changes, and runs the Forge JSON sync (immediate one-shot + 12h loop).
+To use it with Claude Desktop / Claude Code, point your MCP config at
+`docker run … ghcr.io/capeterson/opr-mcp:dev`.
 
-To turn on Army Forge auto-fetch in the container, add `-e FORGE_SYNC=1`:
+To additionally mirror army-book PDFs for full-text indexing, set
+`-e FORGE_DOWNLOAD_PDFS=1`:
 
 ```bash
 docker run --rm -i \
   -v /path/to/your/opr-pdfs:/pdf \
   -v opr-mcp-db:/data/db \
   -v opr-mcp-hf:/data/hf-cache \
-  -e FORGE_SYNC=1 \
+  -e FORGE_DOWNLOAD_PDFS=1 \
   ghcr.io/capeterson/opr-mcp:dev
 ```
 
@@ -258,18 +312,16 @@ server (per the MCP spec) and delegates user identity to Discord.
 
 ### 2. Set environment variables
 
+See the [Auth (Discord OAuth)](#auth-discord-oauth) table above for the full
+list. Minimum required:
+
 ```bash
 export AUTH_ENABLED=true
-export PUBLIC_URL="https://opr.example.com"   # how the world reaches you (https only, except for localhost)
+export AUTH_PUBLIC_URL="https://opr.example.com"
 export DISCORD_CLIENT_ID="..."
 export DISCORD_CLIENT_SECRET="..."
 export DISCORD_GUILD_ID="123456789012345678"
 export AUTH_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
-# Optional:
-export HOST=0.0.0.0          # default 127.0.0.1
-export PORT=8765             # default 8765
-export AUTH_TOKEN_TTL=3600   # access token TTL (sec); default 1h
-export REFRESH_TOKEN_TTL=2592000   # refresh token TTL; default 30d
 ```
 
 ### 3. Run the server
@@ -279,7 +331,7 @@ uv run opr-mcp serve --transport http
 ```
 
 Put a TLS-terminating reverse proxy (Caddy, nginx, Cloudflare) in front of it on
-`PUBLIC_URL` — Discord requires HTTPS for non-localhost redirect URIs.
+`AUTH_PUBLIC_URL` — Discord requires HTTPS for non-localhost redirect URIs.
 
 ### 4. Connect a client
 
@@ -302,12 +354,12 @@ Notes:
   so revoking either one removes both halves of the pair.
 - Guild membership is checked at token-issue time only. Token TTL bounds the
   revocation lag — to evict everyone immediately, lower
-  `AUTH_TOKEN_TTL`, or wipe both tables:
+  `AUTH_TOKEN_TTL_SECONDS`, or wipe both tables:
   `sqlite3 auth.db "DELETE FROM oauth_access_tokens; DELETE FROM oauth_refresh_tokens;"`.
   Deleting only the access-token table leaves refresh tokens able to mint
   fresh access tokens, so don't skip the second statement.
-- With `AUTH_ENABLED` unset, `serve` behaves exactly as before (stdio,
-  no auth) — ideal for local Claude Desktop use.
+- With `AUTH_ENABLED` unset, `serve` behaves as a local stdio server with no
+  auth — ideal for local Claude Desktop use.
 
 ## Tests
 
@@ -320,17 +372,16 @@ Tests stub out the real embedding model so they run offline.
 ## Known limitations
 
 - **Image-only stat blocks** (some army books render unit cards as flattened images)
-  won't yield structured `units` rows. Surrounding text remains searchable; OCR is
-  out of scope for v1.
-- **Heuristic parser.** Some unit cards in some books fall back to chunk-only
-  storage. Search still finds them; structured `lookup_unit` may miss them. Parse
-  failures are logged with PDF + page numbers.
-- **Upgrade tables.** Structured upgrade extraction (returned in
-  `lookup_unit`'s `upgrade_groups` field) is best-effort line-based parsing of
-  the PyMuPDF text dump. Books with non-standard upgrade-section formatting
-  (e.g. multi-column tables that PyMuPDF interleaves unexpectedly) may yield
-  partial results. Falls back gracefully — anything the structured parser
-  misses is still searchable as text via `search_rules`.
+  won't yield structured `units` rows when relying on PDF parsing. The Forge JSON
+  path bypasses this entirely and is the default. OCR is out of scope for v1.
+- **Heuristic PDF parser.** With `PDF_PARSE_UNIT_BLOCKS=true` enabled as a
+  fallback, some unit cards in some books fall back to chunk-only storage. Search
+  still finds them; structured `lookup_unit` may miss them. Parse failures are
+  logged with PDF + page numbers.
+- **Upgrade tables (PDF path).** When falling back to PDF parsing, structured
+  upgrade extraction is best-effort line-based parsing of the PyMuPDF text dump.
+  Books with non-standard upgrade-section formatting may yield partial results.
+  The Forge JSON path doesn't have this limitation.
 - **No reranker.** RRF over BM25 + vector is good enough at this corpus size.
 
 ## Out of scope
