@@ -65,7 +65,10 @@ def test_full_instructions_cover_force_org_and_hero_attachment():
     text = _load_instructions()
     assert "Force organization rules" in text
     assert "Heroes attached to units" in text
-    assert "SINGLE activation" in text
+    # The hero-attachment guidance must spell out that the combined formation
+    # is one activation, not two — that's the rule LLMs most frequently get
+    # wrong when validating list legality.
+    assert "one activation in the turn order" in text
 
 
 def test_instructions_md_is_packaged():

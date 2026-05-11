@@ -97,6 +97,119 @@ def test_ingest_skips_byte_identical_duplicate_under_different_name(tmp_db, tmp_
     assert n_docs == 1
 
 
+def _make_pdf_with_text(path: Path, text: str) -> Path:
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((50, 60), text, fontsize=11)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_ingest_duplicate_sha_skips_before_expensive_parse(tmp_db, tmp_path, monkeypatch):
+    # Regression: when a PDF's bytes match an already-tracked doc under a
+    # different filename, ingest must skip before doing the slow
+    # iter_blocks() + embeddings.encode() work. In a Forge watch dir with
+    # orphan duplicates, every scan would otherwise reparse them.
+    src = _make_pdf(tmp_path / "a.pdf")
+    dup = tmp_path / "b.pdf"
+    dup.write_bytes(src.read_bytes())
+    conn = db.open_db(tmp_db)
+    ingest_pdf(conn, src)
+
+    # Trip-wire: make the parse phase blow up. If the duplicate skip works,
+    # we never call iter_blocks() and the test passes; if it regresses,
+    # the trip-wire raises and we know about it.
+    from opr_mcp.ingest import pipeline as _pipeline
+
+    def _explode(*_a, **_kw):
+        raise AssertionError("iter_blocks() should not be called for known-duplicate sha")
+
+    monkeypatch.setattr(_pipeline, "iter_blocks", _explode)
+    s = ingest_pdf(conn, dup)
+    assert s.documents == 0 and s.skipped == 1
+
+
+def test_ingest_skips_when_file_changes_during_parse(tmp_db, tmp_path, monkeypatch):
+    # Regression for the stale-bytes race: an older worker that hashed +
+    # parsed the file before a newer worker rewrote it must not later
+    # acquire the write lock and overwrite the newer content with its
+    # stale parse. Simulate by mutating the file on disk between the
+    # initial hash and the under-lock re-hash.
+    pdf = _make_pdf(tmp_path / "core.pdf")
+    conn = db.open_db(tmp_db)
+
+    # Pre-seed a doc so _delete_existing would have something to remove
+    # if we proceeded — we'll assert it survives intact.
+    ingest_pdf(conn, pdf)
+    original_rows = conn.execute(
+        "SELECT id, sha256 FROM documents"
+    ).fetchall()
+    assert len(original_rows) == 1
+    original_sha = original_rows[0]["sha256"]
+
+    # Make a *different* PDF that we'll pretend the file became after parsing.
+    new_pdf = _make_pdf_with_text(tmp_path / "_new.pdf", "Different content.")
+    new_bytes = new_pdf.read_bytes()
+    new_pdf.unlink()  # keep filesystem clean
+
+    # Replace the parse phase output so it looks like we parsed the original,
+    # then rewrite the file on disk to the new content before the write phase
+    # re-hashes it. The re-hash inside BEGIN IMMEDIATE must detect the
+    # mismatch and skip, leaving the original DB row untouched.
+    real_iter_blocks = _pipeline_module().iter_blocks
+
+    def _iter_then_rewrite(p):
+        out = list(real_iter_blocks(p))
+        pdf.write_bytes(new_bytes)  # rewrite while "we" still hold parsed output
+        return out
+
+    # Force a reingest path: the existing-row + matching-sha fast path
+    # would short-circuit, so we need digest to differ from existing.sha.
+    # Easiest: delete the existing row so ingest_pdf treats it as new,
+    # but keep `digest` matching original bytes (which we'll then mutate
+    # on disk before the write phase re-hashes).
+    conn.execute("DELETE FROM documents")
+    conn.commit()
+
+    monkeypatch.setattr(_pipeline_module(), "iter_blocks", _iter_then_rewrite)
+    s = ingest_pdf(conn, pdf)
+    assert s.documents == 0
+    assert s.skipped == 1
+    # No doc row got inserted with stale parsed content.
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+    # And the file on disk really did change (sanity-check the trip-wire fired).
+    import hashlib
+    assert hashlib.sha256(pdf.read_bytes()).hexdigest() != original_sha
+
+
+def _pipeline_module():
+    from opr_mcp.ingest import pipeline
+    return pipeline
+
+
+def test_ingest_replacement_skips_when_new_bytes_match_other_doc(tmp_db, tmp_path):
+    # Regression: a tracked PDF whose bytes get replaced with the content of
+    # another already-ingested PDF must not drop its DB row only to then
+    # discover it can't insert the replacement (UNIQUE(sha256) belongs to
+    # the other doc). The pre-write duplicate-sha check has to consider
+    # already-tracked filenames before the _delete_existing call.
+    a = _make_pdf_with_text(tmp_path / "a.pdf", "Content A.")
+    b = _make_pdf_with_text(tmp_path / "b.pdf", "Content B.")
+    conn = db.open_db(tmp_db)
+    ingest_pdf(conn, a)
+    ingest_pdf(conn, b)
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 2
+
+    # a.pdf's bytes get replaced with b.pdf's bytes — same sha as b's row.
+    a.write_bytes(b.read_bytes())
+    s = ingest_pdf(conn, a)
+    assert s.documents == 0 and s.skipped == 1
+    # Both rows still present; nothing got dropped.
+    rows = conn.execute("SELECT filename FROM documents ORDER BY filename").fetchall()
+    assert [r["filename"] for r in rows] == ["a.pdf", "b.pdf"]
+
+
 def test_search_rules_finds_content(ingested_db):
     results = search_rules.run(ingested_db, "how does Tough work")
     assert results, "expected at least one result"
