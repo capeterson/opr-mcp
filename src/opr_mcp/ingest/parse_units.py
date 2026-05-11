@@ -14,13 +14,37 @@ _QUALITY_DEF_RE = re.compile(
     r"\b(?:Q|Quality)\s*[:\-]?\s*(?P<quality>\d\+)\s*[\|/,;\s]+\s*(?:D|Defense)\s*[:\-]?\s*(?P<defense>\d\+)",
     re.IGNORECASE,
 )
+# Solo-line variants for the cell-per-line layout PyMuPDF produces from
+# real OPR per-unit cards, where ``Quality 4+`` and ``Defense 5+`` are
+# emitted on consecutive standalone lines. The combined-line regex above
+# does NOT match these because it expects both halves on the same line.
+# When the line scanner sees BOTH halves (in any order), it sets
+# ``past_stats_line`` — same flag the combined-line variant sets — so
+# the rules-line that follows can be captured without requiring an
+# anchor token from the small ``_COMMON_RULE_NAMES`` whitelist.
+_QUALITY_LINE_RE = re.compile(r"^\s*(?:Q|Quality)\s*[:\-]?\s*\d\+\s*$", re.IGNORECASE)
+_DEFENSE_LINE_RE = re.compile(r"^\s*(?:D|Defense)\s*[:\-]?\s*\d\+\s*$", re.IGNORECASE)
 _QTY_RE = re.compile(r"\[\s*(?P<qty>\d{1,2})\s*\]|\bQty\s*[:\-]?\s*(?P<qty2>\d{1,2})\b", re.IGNORECASE)
-_POINTS_RE = re.compile(r"(?P<pts>\d{1,4})\s*(?:pts|points)\b", re.IGNORECASE)
+# Cost values: ``\d{1,6}`` to handle the AI-Quest variants
+# (``aofqai__`` / ``gfsqai__``) that legitimately ship costs in the
+# tens-of-thousands range — e.g. the 100000-pt Waskatsin in
+# ``GFF - GOBLIN RECLAIMERS`` or the dual-cost ``95110pts`` glitch
+# where PyMuPDF glues two adjacent cost cells. Pre-fix the 4-digit
+# cap rejected these unit headers, so the unit was either skipped
+# entirely or its name fell back to the section title with
+# ``base_points=None``.
+_POINTS_RE = re.compile(r"(?P<pts>\d{1,6})\s*(?:pts|points)\b", re.IGNORECASE)
 
 # Real OPR unit-card name line: "Kemba Brute Boss [1] - 140pts"
-# Captures the bare unit name, qty, and points in one shot.
+# Captures the bare unit name, qty, and points in one shot. The
+# character class permits ``&`` for paired-hero names like
+# ``Omoshu & Kothiz``, ``"`` for nicknamed heroes like
+# ``Ranjo "Swiftsnare"``, and digits for serial-numbered units
+# like ``Echo-3G01`` / ``Xyros-Z320``. The first character must
+# still be a letter so prose lines like ``5x Heavy Claws`` don't
+# accidentally parse as a unit-name line.
 _UNIT_NAME_LINE_RE = re.compile(
-    r"^(?P<name>[A-Za-z][A-Za-z' \-/]+?)\s*\[\s*(?P<qty>\d{1,2})\s*\]\s*-\s*(?P<pts>\d{1,4})\s*(?:pts|points)\b",
+    r"^(?P<name>[A-Za-z][A-Za-z0-9'&\" \-/]+?)\s*\[\s*(?P<qty>\d{1,2})\s*\]\s*-\s*(?P<pts>\d{1,6})\s*(?:pts|points)\b",
     re.IGNORECASE,
 )
 
@@ -226,6 +250,16 @@ def _is_inprofile_heading(line: str) -> bool:
 _RULES_ZONE_HEADINGS = frozenset({"special rules", "rules"})
 
 
+# Headings whose prefix strip is only safe when the remainder is a
+# single weapon/gear token. ``Melee`` and ``Ranged`` are short common
+# words that are also legitimate first words of multi-word rule names
+# (``Melee Evasion`` / ``Melee Slayer`` / ``Melee Shrouding``). Without
+# this guard, ``Melee Evasion, Scout, Shadowborn`` would lose the
+# ``Melee`` half of the first rule because ``melee`` matches the
+# weapons-column heading.
+_AMBIGUOUS_PREFIX_HEADINGS = frozenset({"melee", "ranged"})
+
+
 def _strip_inprofile_heading(line: str) -> tuple[str | None, str]:
     """Strip an in-profile heading prefix from ``line``.
 
@@ -240,6 +274,12 @@ def _strip_inprofile_heading(line: str) -> tuple[str | None, str]:
     If the entire line parses as a clean ``Name(body)`` token
     (e.g. ``Psychic Staff (A2)``), no stripping is performed — the
     leading word is part of the gear name, not a heading prefix.
+
+    For headings in :data:`_AMBIGUOUS_PREFIX_HEADINGS` (``melee`` /
+    ``ranged``), the prefix is only stripped when the remainder is a
+    single ``Name(body)`` gear/weapon token — never when the remainder
+    is a comma-separated list, which is almost certainly a rules line
+    starting with a multi-word rule name like ``Melee Evasion``.
     """
     s = line.strip()
     if _EQUIP_TOKEN_RE.fullmatch(s):
@@ -253,7 +293,17 @@ def _strip_inprofile_heading(line: str) -> tuple[str | None, str]:
         for sep in (" ", ":"):
             prefix = h + sep
             if norm.startswith(prefix):
-                return kind, s[len(prefix):].strip()
+                remainder = s[len(prefix):].strip()
+                # For ambiguous short-prefix headings (``melee`` /
+                # ``ranged``), only strip when the remainder is a
+                # single equipment token (``Melee Rifle (24", A1)``);
+                # leave alone when the remainder looks like a comma-
+                # rules list or a bare TitleCase rule extension
+                # (``Evasion, Scout, Shadowborn`` / ``Slayer``).
+                if (h in _AMBIGUOUS_PREFIX_HEADINGS
+                        and not _EQUIP_TOKEN_RE.fullmatch(remainder)):
+                    return None, s
+                return kind, remainder
     return None, s
 
 # Two glossary formats observed in real OPR PDFs:
@@ -817,6 +867,24 @@ def parse_unit(section: Section) -> ParsedUnit | None:
                 continue
             if _QUALITY_DEF_RE.search(line):
                 continue
+            # Reject rules-line shapes: a comma-separated list of
+            # TitleCase tokens (the parametric ``Tough(N)`` /
+            # ``Split(...)`` form gives away that this is a rules
+            # line, not a unit name). Without this, multi-line unit
+            # name + ``[N]`` cards (the AI-Quest layout where the
+            # name spans two cells and the ``- NNNpts`` is glued onto
+            # a separate line) would fall through to the rules line
+            # below them and get stored as bogus unit names like
+            # ``Changebound, Hero, Split(Lesser Change Horror [1]),
+            # Tough(9)``.
+            if "," in line and ("(" in line or " " in line):
+                # Look like a rules list? Comma-split tokens, each
+                # starting with a capital letter — count the cap-leading
+                # comma-segments. Two or more = rules line, reject.
+                segs = [seg.strip() for seg in line.split(",")]
+                cap_segs = [s for s in segs if s and s[0:1].isupper()]
+                if len(cap_segs) >= 2:
+                    continue
             name = line
             break
 
@@ -908,6 +976,16 @@ def parse_unit(section: Section) -> ParsedUnit | None:
     min_consumed_idx = min(consumed_indices) if consumed_indices else None
 
     past_stats_line = False
+    # Real per-unit cards split Q and D across two consecutive
+    # standalone lines (``Quality 4+`` / ``Defense 5+``). The combined
+    # _QUALITY_DEF_RE (line 980 below) only matches the inline form;
+    # for the split form, track each half separately and flip
+    # ``past_stats_line`` once both have been seen. Without this, the
+    # rules-line directly under Defense gets gated out for any unit
+    # whose rules don't include a token in ``_COMMON_RULE_NAMES``
+    # (e.g. ``Highborn`` / ``Caster Group, Hold the Line``).
+    saw_quality_solo = False
+    saw_defense_solo = False
     in_rules_zone = False
     for line_idx, line in enumerate(text.splitlines()):
         # Lines that the table extractor already consumed (column header,
@@ -969,6 +1047,20 @@ def parse_unit(section: Section) -> ParsedUnit | None:
             continue
         if _QUALITY_DEF_RE.search(s):
             past_stats_line = True
+            continue
+        # Split-line Q/D form (``Quality 4+`` alone, ``Defense 5+`` alone).
+        # Set the flag only once both halves have been observed so a
+        # rogue ``Quality`` mention earlier in the section can't trip it
+        # prematurely.
+        if _QUALITY_LINE_RE.match(s):
+            saw_quality_solo = True
+            if saw_quality_solo and saw_defense_solo:
+                past_stats_line = True
+            continue
+        if _DEFENSE_LINE_RE.match(s):
+            saw_defense_solo = True
+            if saw_quality_solo and saw_defense_solo:
+                past_stats_line = True
             continue
 
         # Parenthesized list: split per-item by body shape. Weapon and

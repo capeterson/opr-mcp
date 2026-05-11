@@ -1393,3 +1393,221 @@ def test_parse_special_rules_glued_aura_banner_prefix_stripped():
     names = {r.name for r in rules}
     assert "Aura Special Rules" not in names, names
     assert {"Vanguard", "Stealth Aura"}.issubset(names), names
+
+
+# ---------------------------------------------------------------------------
+# Bug-1 regression: rules-line drop with split-line Q/D layout.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_unit_rules_line_after_split_qd_no_anchor_token():
+    """Real OPR per-unit cards put ``Quality 4+`` and ``Defense 5+`` on
+    consecutive standalone lines (PyMuPDF's cell-per-line table extraction).
+    The rules line directly under Defense must be captured even when none
+    of its tokens are in ``_COMMON_RULE_NAMES``.
+
+    Pre-fix: the line-by-line scanner used the inline ``Quality 4+ Defense
+    5+`` regex to set ``past_stats_line``. When Q and D were split, the
+    flag never flipped, so a rules-line of multi-word army-specific names
+    (``Highborn`` / ``Caster Group, Hold the Line``) was silently dropped.
+    Fix tracks each half separately and flips the flag when both are seen.
+    """
+    s = _section(
+        "Mage Council [5] - 170pts\n"
+        "Quality 5+\n"
+        "Defense 5+\n"
+        "Caster Group, Hold the Line\n"
+        "Weapon\n"
+        "RNG\n"
+        "ATK\n"
+        "AP\n"
+        "SPE\n"
+        "5x Magic Staffs\n"
+        "12\"\n"
+        "A2\n"
+        "-\n"
+        "Rending\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert u.name == "Mage Council"
+    assert u.qty == 5
+    assert u.base_points == 170
+    rule_set = set(u.rules)
+    assert "Caster Group" in rule_set, u.rules
+    assert "Hold the Line" in rule_set, u.rules
+
+
+def test_parse_unit_rules_line_after_split_qd_single_token():
+    """Single-token rules-line (``Highborn``) under split Q/D must also be
+    captured. This exercises the bare-rule fallback path (one bare token
+    can't go through ``_parse_paren_line``'s >=2 gate)."""
+    s = _section(
+        "Warriors [10] - 100pts\n"
+        "Quality 4+\n"
+        "Defense 5+\n"
+        "Highborn\n"
+        "Weapon\n"
+        "RNG\n"
+        "ATK\n"
+        "AP\n"
+        "SPE\n"
+        "10x Hand Weapons\n"
+        "-\n"
+        "A1\n"
+        "-\n"
+        "-\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert u.name == "Warriors"
+    assert "Highborn" in set(u.rules), u.rules
+
+
+def test_parse_unit_rules_line_starting_with_melee_prefix():
+    """``Melee Evasion`` is a real OPR rule; the parser must NOT mistake
+    its leading ``Melee`` for a column-heading prefix and strip it.
+
+    Pre-fix the in-profile heading stripper turned
+    ``Melee Evasion, Scout, Shadowborn`` into
+    ``Evasion, Scout, Shadowborn``. Affects any unit with a ``Melee
+    *`` or ``Ranged *`` rule name (Melee Evasion / Melee Slayer /
+    Melee Shrouding / Ranged Slayer)."""
+    s = _section(
+        "Tormentors [5] - 100pts\n"
+        "Quality 4+\n"
+        "Defense 6+\n"
+        "Melee Evasion, Scout, Shadowborn\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "5x Toxin Daggers\n-\nA2\n-\nBane\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert "Melee Evasion" in set(u.rules), u.rules
+
+
+def test_parse_unit_melee_prefix_glued_weapon_still_captures_equipment():
+    """The (rare) legitimate use case for the Melee/Ranged prefix strip —
+    a glued ``Melee Rifle (24", A1)`` line. The weapon must still be
+    captured as equipment; the exact stored name (``Rifle`` vs
+    ``Melee Rifle``) is not asserted because (a) real OPR PDFs never
+    produce this layout in the corpus, and (b) keeping the leading
+    ``Melee`` is harmless and arguably more faithful to the source."""
+    s = _section(
+        "Squad [5] - 90pts\n"
+        "Quality 4+   Defense 5+\n"
+        "Melee Rifle (24\", A1, AP(1))\n"
+        "Tough(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    eq_names = {e["name"] for e in u.equipment}
+    assert any(n.endswith("Rifle") for n in eq_names), eq_names
+
+
+def test_parse_unit_accepts_six_digit_points():
+    """AI-Quest variants (``aofqai__``/``gfsqai__``) and some
+    Reclaimer / Quest books legitimately ship 5-6 digit unit costs
+    (``Waskatsin [1] - 100000pts``). Pre-fix the points regex capped
+    at 4 digits, so the unit-card header didn't match and either the
+    unit was skipped entirely or its base_points fell back to None.
+    """
+    s = _section(
+        "Waskatsin [1] - 100000pts\n"
+        "Quality 4+\n"
+        "Defense 3+\n"
+        "Tough 6\n"
+        "Hero, Mischievous, Tough(6)\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Magic Spear\n-\nA3\n2\nDeadly(3)\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert u.name == "Waskatsin"
+    assert u.qty == 1
+    assert u.base_points == 100000
+
+
+def test_parse_unit_fallback_name_rejects_rules_line_shape():
+    """When the segmenter fails to capture a unit-card name+pts header
+    (multi-line Quest-variant layout), the parse_unit fallback must
+    NOT pick up a comma-separated rules-line as the unit name. Affects
+    the AI-Quest gfsqai variants where unit names span two cells."""
+    s = _section(
+        # No name+pts header at top — segmenter dropped it.
+        "Quality 4+\n"
+        "Defense 4+\n"
+        "Tough 9\n"
+        "Changebound, Hero, Split(Lesser Change Horror [1]), Tough(9)\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Power Hammer\n-\nA3\n-\nBlast(3), Shred\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    # Either the unit is rejected (no usable name) or it gets a real
+    # name; what must NOT happen is the comma-separated rules line being
+    # stored as the unit name.
+    if u is not None:
+        assert "," not in u.name, u.name
+        assert "(" not in u.name, u.name
+
+
+def test_parse_unit_paired_hero_name_with_ampersand():
+    """Paired-hero unit cards like ``Omoshu & Kothiz [1] - 100pts``
+    must parse. Pre-fix the name char class excluded ``&``, so the
+    name-line didn't match and the parser fell back to picking the
+    first weapon name (``Heavy Claws``) as the unit name."""
+    s = _section(
+        "Omoshu & Kothiz [1] - 100pts\n"
+        "Quality 5+\n"
+        "Defense 5+\n"
+        "Tough 3\n"
+        "Good Fighter, Hero, Tough(3), Unique\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Heavy Claws\n-\nA3\n2\n-\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert u.name == "Omoshu & Kothiz"
+    assert u.qty == 1
+    assert u.base_points == 100
+
+
+def test_parse_unit_quoted_nickname():
+    """``Ranjo "Swiftsnare" [1] - 90pts`` must parse — the ``"`` chars
+    are part of the nickname, not delimiters."""
+    s = _section(
+        'Ranjo "Swiftsnare" [1] - 90pts\n'
+        "Quality 3+\n"
+        "Defense 4+\n"
+        "Tough 3\n"
+        "Hero, Tough(3)\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Spear\n-\nA3\n-\nThrust\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert u.name == 'Ranjo "Swiftsnare"'
+
+
+def test_parse_unit_serial_numbered_name():
+    """``Echo-3G01 [1] - 80pts`` (alphanumeric serial-style names)."""
+    s = _section(
+        "Echo-3G01 [1] - 80pts\n"
+        "Quality 4+\n"
+        "Defense 4+\n"
+        "Hero\n"
+        "Weapon\nRNG\nATK\nAP\nSPE\n"
+        "Pistol\n12\"\nA1\n-\n-\n",
+        title=None,
+    )
+    u = parse_unit(s)
+    assert u is not None
+    assert u.name == "Echo-3G01"
