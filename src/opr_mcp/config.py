@@ -18,7 +18,7 @@ DEFAULT_REFRESH_TTL = 30 * 24 * 3600
 
 
 def db_path() -> Path:
-    env = os.environ.get("DB")
+    env = os.environ.get("DB_PATH")
     if env:
         return Path(env).expanduser()
     return Path(user_data_dir(APP_NAME, appauthor=False)) / "opr.db"
@@ -31,7 +31,7 @@ def auth_db_path() -> Path:
     changes) doesn't drop registered clients, issued tokens, or stashed
     Discord refresh tokens. Defaults to ``auth.db`` next to the content DB.
     """
-    env = os.environ.get("AUTH_DB")
+    env = os.environ.get("AUTH_DB_PATH")
     if env:
         return Path(env).expanduser()
     return db_path().parent / "auth.db"
@@ -48,7 +48,7 @@ def instructions_file() -> Path | None:
     return Path(raw).expanduser()
 
 
-def forge_ingest_pdf_units() -> bool:
+def pdf_parse_unit_blocks() -> bool:
     """Whether the PDF parser should write to ``units`` / ``unit_upgrades``.
 
     Defaults to off because the Forge JSON ingest path is authoritative
@@ -56,7 +56,7 @@ def forge_ingest_pdf_units() -> bool:
     around for any book the JSON ingest can't reach (e.g. user-supplied
     PDFs not on Forge).
     """
-    return _bool_env("FORGE_INGEST_PDF_UNITS", False)
+    return _bool_env("PDF_PARSE_UNIT_BLOCKS", False)
 
 
 def configure_logging() -> None:
@@ -69,7 +69,7 @@ def configure_logging() -> None:
 
 def _bool_env(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
@@ -113,11 +113,11 @@ def auth_enabled() -> bool:
 
 
 def http_host() -> str:
-    return os.environ.get("HOST", DEFAULT_HTTP_HOST)
+    return os.environ.get("SERVER_HOST", DEFAULT_HTTP_HOST)
 
 
 def http_port() -> int:
-    return _int_env("PORT", DEFAULT_HTTP_PORT)
+    return _int_env("SERVER_PORT", DEFAULT_HTTP_PORT)
 
 
 # Hostnames we allow over plain HTTP for local development.
@@ -139,12 +139,12 @@ def _is_acceptable_public_url(url: str) -> bool:
 
 def load_auth_config() -> AuthConfig:
     """Load and validate auth config from environment. Call only when auth_enabled()."""
-    public_url = os.environ.get("PUBLIC_URL", "").strip()
+    public_url = os.environ.get("AUTH_PUBLIC_URL", "").strip()
     if not public_url:
-        raise ConfigError("PUBLIC_URL is required when AUTH_ENABLED=true")
+        raise ConfigError("AUTH_PUBLIC_URL is required when AUTH_ENABLED=true")
     if not _is_acceptable_public_url(public_url):
         raise ConfigError(
-            "PUBLIC_URL must be https:// (http:// is only allowed when the host is localhost or 127.0.0.1)"
+            "AUTH_PUBLIC_URL must be https:// (http:// is only allowed when the host is localhost or 127.0.0.1)"
         )
 
     required = {
@@ -165,6 +165,6 @@ def load_auth_config() -> AuthConfig:
         discord_client_secret=required["DISCORD_CLIENT_SECRET"],
         discord_guild_id=required["DISCORD_GUILD_ID"],
         auth_secret=required["AUTH_SECRET"],
-        access_token_ttl=_int_env("AUTH_TOKEN_TTL", DEFAULT_ACCESS_TTL),
-        refresh_token_ttl=_int_env("REFRESH_TOKEN_TTL", DEFAULT_REFRESH_TTL),
+        access_token_ttl=_int_env("AUTH_TOKEN_TTL_SECONDS", DEFAULT_ACCESS_TTL),
+        refresh_token_ttl=_int_env("AUTH_REFRESH_TOKEN_TTL_SECONDS", DEFAULT_REFRESH_TTL),
     )

@@ -3,8 +3,27 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from opr_mcp import db
 from opr_mcp.forge import api, sync
+
+
+@pytest.fixture(autouse=True)
+def _default_to_download_pdfs(monkeypatch):
+    """Pre-existing tests in this module were written when ``sync.sync``
+    mirrored PDFs by default. The production default flipped to JSON-only —
+    wrap ``sync.sync`` so calls without an explicit ``download_pdfs`` still
+    exercise the PDF leg here. Tests that pin JSON-only behavior pass
+    ``download_pdfs=False`` explicitly.
+    """
+    real = sync.sync
+
+    def wrapped(conn, pdf_dir, **kwargs):
+        kwargs.setdefault("download_pdfs", True)
+        return real(conn, pdf_dir, **kwargs)
+
+    monkeypatch.setattr(sync, "sync", wrapped)
 
 
 def _book(
@@ -1032,3 +1051,74 @@ def test_sync_bumps_only_latest_render_row(tmp_db, tmp_path):
 
     assert rid1_checked_after_three == rid1_checked_after_two
     assert rid2_checked_after_three >= rid1_checked_after_three
+
+
+def test_json_only_sync_skips_pdf_resolve_and_download(tmp_db, tmp_path):
+    """With ``download_pdfs=False`` (the production default), the PDF leg
+    is short-circuited entirely: no /pdf resolve, no CDN download. Only
+    the structured JSON detail is fetched.
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("U1", "B", [4])
+
+    with (
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf",
+                     side_effect=AssertionError("PDF resolve must not run in JSON-only mode")),
+        patch.object(sync, "_http_download",
+                     side_effect=AssertionError("download must not run in JSON-only mode")),
+    ):
+        stats = sync.sync(
+            conn, tmp_path, game_systems=[4], download_pdfs=False,
+        )
+
+    # Detail synced; no new/changed PDF rows; placeholder row exists.
+    assert stats.details_synced == 1
+    assert stats.new == 0
+    assert stats.changed == 0
+    rows = conn.execute(
+        "SELECT render_id, local_path, detail_synced_at FROM forge_books "
+        "WHERE uid = 'U1' AND game_system = 4",
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["render_id"] == sync.JSON_ONLY_RENDER_ID
+    assert rows[0]["local_path"] is None
+    assert rows[0]["detail_synced_at"]
+
+
+def test_json_only_then_opt_in_to_pdf_mirror(tmp_db, tmp_path):
+    """Flipping ``download_pdfs`` from False to True on a later scan
+    creates a real PDF row alongside the JSON-only placeholder; both rows
+    coexist under their own renderIds.
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("U1", "B", [4])
+    written: dict[Path, bytes] = {}
+
+    with (
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf",
+                     side_effect=lambda u, g: _stub_resolve(u, g, "RID1")),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written=written)),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4], download_pdfs=False)
+        stats = sync.sync(conn, tmp_path, game_systems=[4], download_pdfs=True)
+
+    rows = conn.execute(
+        "SELECT render_id, local_path FROM forge_books "
+        "WHERE uid='U1' AND game_system=4 ORDER BY render_id",
+    ).fetchall()
+    render_ids = sorted(r["render_id"] for r in rows)
+    assert sync.JSON_ONLY_RENDER_ID in render_ids
+    assert "RID1" in render_ids
+    real_row = next(r for r in rows if r["render_id"] == "RID1")
+    assert real_row["local_path"]
+    # From the pair's perspective the JSON-only placeholder already
+    # represented "we know about this book", so the new PDF row counts as
+    # a `changed` event rather than `new`. Either way: exactly one CDN
+    # download happened.
+    assert stats.changed == 1
+    assert stats.new == 0
+    assert len(written) == 1

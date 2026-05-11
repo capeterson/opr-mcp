@@ -49,6 +49,14 @@ log = logging.getLogger(__name__)
 
 DOWNLOAD_CHUNK = 1 << 15
 
+# Sentinel render_id for placeholder ``forge_books`` rows written when
+# JSON-only sync runs (``download_pdfs=False``) and no row yet exists for
+# a (uid, gs) pair. The placeholder carries the detail-sync bookkeeping
+# (``detail_synced_at`` / ``detail_modified_at``) but has NULL pdf/local
+# paths — a later opt-in PDF mirror sweep creates a *new* row keyed by
+# the real renderId, leaving this one in place as a no-op.
+JSON_ONLY_RENDER_ID = "__json-only__"
+
 _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -377,10 +385,11 @@ def _persist_pdf_row(
 def _persist_detail_state(
     conn: sqlite3.Connection,
     *,
-    uid: str,
+    book: dict,
     gid: int,
     detail_synced_at: str,
     detail_modified_at: str | None,
+    now: str,
 ) -> None:
     """Stamp detail-sync bookkeeping on every render_id row for (uid, gs).
 
@@ -389,7 +398,39 @@ def _persist_detail_state(
     timestamps across all retained historical rows. Trivial overhead and
     keeps the next-scan ``_detail_needs_refresh`` check correct
     regardless of which row ``_latest_row`` returns.
+
+    When no row at all exists for this pair (the JSON-only path running
+    without an opt-in PDF mirror), a placeholder row keyed by the
+    :data:`JSON_ONLY_RENDER_ID` sentinel is inserted first so the UPDATE
+    has something to stamp. A later opt-in PDF mirror sweep adds a real
+    row under its own renderId, leaving the sentinel in place as a no-op.
     """
+    uid = book["uid"]
+    has_row = conn.execute(
+        "SELECT 1 FROM forge_books WHERE uid = ? AND game_system = ? LIMIT 1",
+        (uid, gid),
+    ).fetchone()
+    if not has_row:
+        conn.execute(
+            """
+            INSERT INTO forge_books
+              (uid, game_system, render_id, name, faction, version, official,
+               pdf_filename, pdf_path, local_path,
+               last_checked, last_changed, modified_at,
+               detail_synced_at, detail_modified_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)
+            """,
+            (
+                uid, gid, JSON_ONLY_RENDER_ID,
+                book.get("name") or uid,
+                book.get("factionName") or "",
+                book.get("versionString") or "",
+                1 if book.get("official") else 0,
+                now, now, detail_modified_at,
+                detail_synced_at, detail_modified_at,
+            ),
+        )
+        return
     conn.execute(
         "UPDATE forge_books SET detail_synced_at = ?, detail_modified_at = ? "
         "WHERE uid = ? AND game_system = ?",
@@ -430,10 +471,16 @@ def _process_pair(
     pdf_dir: Path,
     now: str,
     download: bool,
+    download_pdfs: bool,
     stats: SyncStats,
 ) -> None:
     """Check PDF and detail freshness for one (book, game_system) pair,
     fetch only what's outdated, and update bookkeeping.
+
+    When ``download_pdfs`` is False, the PDF resolve / CDN download / row
+    persist branch is skipped entirely — only the structured JSON detail
+    is synced (the canonical source of unit / upgrade rows). When True,
+    both legs run; PDFs land under ``pdf_dir`` for the watcher to ingest.
     """
     uid = book["uid"]
     label = book.get("name") or uid
@@ -441,12 +488,15 @@ def _process_pair(
 
     latest = _latest_row(conn, uid, gid)
     is_new = latest is None
-    pdf_outdated = _pdf_needs_refresh(latest, upstream_modified)
+    # In JSON-only mode the PDF branch is unreachable, so don't compute
+    # "PDF needs refresh" — it would otherwise force the unchanged-count
+    # branch to fall through every scan.
+    pdf_outdated = download_pdfs and _pdf_needs_refresh(latest, upstream_modified)
     detail_outdated = _detail_needs_refresh(latest, upstream_modified)
 
     if not pdf_outdated and not detail_outdated:
-        # latest is guaranteed non-None here: _pdf_needs_refresh returns
-        # True whenever the row is missing.
+        # latest is guaranteed non-None here: _detail_needs_refresh
+        # returns True whenever the row is missing.
         _bump_last_checked(
             conn, uid=uid, gid=gid,
             render_id=latest["render_id"],
@@ -560,9 +610,10 @@ def _process_pair(
                     )
                     _persist_detail_state(
                         conn,
-                        uid=uid, gid=gid,
+                        book=book, gid=gid,
                         detail_synced_at=now,
                         detail_modified_at=upstream_modified,
+                        now=now,
                     )
                 except Exception as exc:  # noqa: BLE001
                     conn.execute("ROLLBACK TO SAVEPOINT forge_detail")
@@ -588,14 +639,23 @@ def sync(
     game_systems: list[int] | None = None,
     workers: int = 1,  # retained for CLI compat; sync is single-threaded.
     download: bool = True,
+    download_pdfs: bool = False,
     prune: bool = True,
 ) -> SyncStats:
-    """Run one full Army Forge scan + download into ``pdf_dir``.
+    """Run one full Army Forge scan into ``pdf_dir``.
 
     ``filters`` defaults to ``['official']``. ``game_systems`` defaults to
     every game system in :data:`api.GAME_SYSTEMS`. With ``download=False``
     the DB and disk are left alone but counters reflect what would change.
     With ``prune=False``, stale rows are kept (default is to prune).
+
+    ``download_pdfs`` controls whether the PDF mirror leg runs. By default
+    only the structured JSON detail is synced — that's the canonical source
+    for unit / upgrade rows. Set ``download_pdfs=True`` to additionally
+    resolve, download, and persist the army-book PDF for every pair so the
+    PDF watcher can index its full text. ``pdf_dir`` is unused in the
+    JSON-only mode but still required, since flipping the toggle on later
+    expects a stable destination.
 
     The scan is single-threaded by design — every outbound request is
     rate-limited at 1/3s by default, so a worker pool would just block
@@ -639,7 +699,8 @@ def sync(
             _process_pair(
                 conn,
                 book=book, gid=gid, pdf_dir=pdf_dir,
-                now=now, download=download, stats=stats,
+                now=now, download=download, download_pdfs=download_pdfs,
+                stats=stats,
             )
         except Exception as exc:  # noqa: BLE001 — keep scanning on per-pair crashes
             log.exception(
@@ -666,8 +727,9 @@ def sync(
 
     conn.commit()
     log.info(
-        "forge: scan complete (new=%d changed=%d unchanged=%d "
+        "forge: scan complete [%s] (new=%d changed=%d unchanged=%d "
         "details=%d pruned=%d failed=%d of %d pair(s))",
+        "json+pdf" if download_pdfs else "json-only",
         stats.new, stats.changed, stats.unchanged,
         stats.details_synced, stats.pruned, len(stats.failed), stats.seen,
     )

@@ -7,7 +7,7 @@ A process-wide rate limiter gates every outbound request (listing, PDF
 resolve, structured detail, and CDN download) so a scheduled scan or
 backfill can't burst on the OPR-hosted services. The default minimum
 interval is 3 seconds; tweak via :func:`set_min_interval` or the
-``FORGE_MIN_REQUEST_INTERVAL`` env var.
+``FORGE_MIN_REQUEST_INTERVAL_SECONDS`` env var.
 """
 from __future__ import annotations
 
@@ -99,14 +99,14 @@ class _RateLimiter:
 
 
 def _initial_min_interval() -> float:
-    raw = os.environ.get("FORGE_MIN_REQUEST_INTERVAL")
+    raw = os.environ.get("FORGE_MIN_REQUEST_INTERVAL_SECONDS")
     if raw is None or raw == "":
         return DEFAULT_MIN_REQUEST_INTERVAL
     try:
         return max(0.0, float(raw))
     except ValueError:
         log.warning(
-            "FORGE_MIN_REQUEST_INTERVAL=%r is not a number; using default %.1fs",
+            "FORGE_MIN_REQUEST_INTERVAL_SECONDS=%r is not a number; using default %.1fs",
             raw, DEFAULT_MIN_REQUEST_INTERVAL,
         )
         return DEFAULT_MIN_REQUEST_INTERVAL

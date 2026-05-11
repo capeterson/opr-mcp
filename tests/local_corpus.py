@@ -192,7 +192,7 @@ def ensure_corpus_ingested(
     for j in DUMPS_DIR.glob("*.json"):
         j.unlink()
 
-    os.environ["DB"] = str(DB_PATH)
+    os.environ["DB_PATH"] = str(DB_PATH)
     conn = _db.open_db(DB_PATH)
 
     started = time.time()

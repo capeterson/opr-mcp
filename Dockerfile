@@ -39,7 +39,7 @@ FROM debian:bookworm-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:/python/bin:$PATH" \
-    DB=/data/db/opr.db \
+    DB_PATH=/data/db/opr.db \
     HF_HOME=/data/hf-cache
 
 RUN apt-get update \
@@ -52,9 +52,10 @@ COPY --from=build /python /python
 COPY --from=build /app/.venv /app/.venv
 
 # Mount points:
-#   /pdf           — user's PDF corpus + Army Forge auto-fetch destination
-#                    (FORGE_SYNC=1 drops books in /pdf/forge/, picked up by
-#                    the recursive watcher).
+#   /pdf           — user's PDF corpus (e.g. advanced rules / lore PDFs you
+#                    drop in). FORGE_SYNC is on by default and runs JSON-only;
+#                    set FORGE_DOWNLOAD_PDFS=1 to additionally mirror army-book
+#                    PDFs into /pdf/forge/ for full-text indexing.
 #   /data/db       — SQLite index. Must be writable.
 #   /data/hf-cache — HuggingFace model cache.
 RUN mkdir -p /pdf /data/db /data/hf-cache

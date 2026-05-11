@@ -33,7 +33,7 @@ import numpy as np
 # (so we don't need the 130 MB BGE model on this run).
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
-os.environ["DB"] = str(REPO / "tests" / "_local_corpus_cache" / "corpus.db")
+os.environ["DB_PATH"] = str(REPO / "tests" / "_local_corpus_cache" / "corpus.db")
 os.environ["EMBED_MODEL"] = "stub"
 
 from opr_mcp import embeddings as _emb  # noqa: E402

@@ -25,11 +25,13 @@ class ForgeScheduler:
         interval_seconds: float,
         filters: list[str],
         game_systems: list[int] | None,
+        download_pdfs: bool = False,
     ) -> None:
         self.pdf_dir = pdf_dir
         self.interval_seconds = interval_seconds
         self.filters = filters
         self.game_systems = game_systems
+        self.download_pdfs = download_pdfs
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._initial = True
@@ -43,10 +45,12 @@ class ForgeScheduler:
         )
         self._thread.start()
         log.info(
-            "forge: scheduler started (interval=%ds, filters=%s, games=%s, dir=%s)",
+            "forge: scheduler started (interval=%ds, filters=%s, games=%s, "
+            "mode=%s, dir=%s)",
             int(self.interval_seconds),
             ",".join(self.filters),
             ",".join(str(g) for g in (self.game_systems or [])) or "all",
+            "json+pdf" if self.download_pdfs else "json-only",
             self.pdf_dir,
         )
 
@@ -70,6 +74,7 @@ class ForgeScheduler:
                     self.pdf_dir,
                     filters=self.filters,
                     game_systems=self.game_systems,
+                    download_pdfs=self.download_pdfs,
                 )
             finally:
                 conn.close()

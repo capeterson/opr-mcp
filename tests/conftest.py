@@ -73,16 +73,16 @@ def _disable_forge_rate_limit():
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
     p = tmp_path / "opr.db"
-    monkeypatch.setenv("DB", str(p))
+    monkeypatch.setenv("DB_PATH", str(p))
     return p
 
 
 @pytest.fixture
 def tmp_auth_db(tmp_path, monkeypatch):
     p = tmp_path / "auth.db"
-    monkeypatch.setenv("AUTH_DB", str(p))
-    # Point DB at a sibling path that doesn't exist so the legacy-auth migration
-    # in open_auth_db() can't latch onto whatever opr.db sits in the host's
-    # user-data dir.
-    monkeypatch.setenv("DB", str(tmp_path / "opr.db"))
+    monkeypatch.setenv("AUTH_DB_PATH", str(p))
+    # Point DB_PATH at a sibling path that doesn't exist so the legacy-auth
+    # migration in open_auth_db() can't latch onto whatever opr.db sits in
+    # the host's user-data dir.
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "opr.db"))
     return p

@@ -9,7 +9,7 @@ from opr_mcp.config import ConfigError, load_auth_config
 def _set_required(monkeypatch, **overrides):
     base = {
         "AUTH_ENABLED": "true",
-        "PUBLIC_URL": "https://opr.example.com",
+        "AUTH_PUBLIC_URL": "https://opr.example.com",
         "DISCORD_CLIENT_ID": "cid",
         "DISCORD_CLIENT_SECRET": "csec",
         "DISCORD_GUILD_ID": "G1",
@@ -27,12 +27,12 @@ def test_https_url_accepted(monkeypatch):
 
 
 def test_localhost_http_accepted(monkeypatch):
-    _set_required(monkeypatch, PUBLIC_URL="http://localhost:8765")
+    _set_required(monkeypatch, AUTH_PUBLIC_URL="http://localhost:8765")
     assert load_auth_config().public_url == "http://localhost:8765"
 
 
 def test_loopback_http_accepted(monkeypatch):
-    _set_required(monkeypatch, PUBLIC_URL="http://127.0.0.1:8765")
+    _set_required(monkeypatch, AUTH_PUBLIC_URL="http://127.0.0.1:8765")
     assert load_auth_config().public_url == "http://127.0.0.1:8765"
 
 
@@ -47,7 +47,7 @@ def test_loopback_http_accepted(monkeypatch):
     ],
 )
 def test_unacceptable_urls_rejected(monkeypatch, url):
-    _set_required(monkeypatch, PUBLIC_URL=url)
+    _set_required(monkeypatch, AUTH_PUBLIC_URL=url)
     with pytest.raises(ConfigError):
         load_auth_config()
 
@@ -59,6 +59,6 @@ def test_missing_discord_creds_rejected(monkeypatch):
 
 
 def test_missing_public_url_rejected(monkeypatch):
-    _set_required(monkeypatch, PUBLIC_URL="")
+    _set_required(monkeypatch, AUTH_PUBLIC_URL="")
     with pytest.raises(ConfigError):
         load_auth_config()

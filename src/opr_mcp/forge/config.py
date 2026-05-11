@@ -6,7 +6,7 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-from ..config import APP_NAME
+from ..config import APP_NAME, _bool_env
 from .api import GAME_SYSTEMS, SLUG_TO_ID
 
 DEFAULT_INTERVAL_SECONDS = 12 * 60 * 60  # 12 hours
@@ -128,6 +128,22 @@ def pdf_dir(serve_pdf_dir: Path | None = None) -> Path:
 
 
 def enabled_for_serve() -> bool:
-    """Read ``FORGE_SYNC`` — opt-in flag for the background scheduler."""
-    raw = os.environ.get("FORGE_SYNC", "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    """Read ``FORGE_SYNC`` — flag for the background Forge scheduler.
+
+    Defaults to **on**: the JSON detail sync is the canonical source for
+    army-roster data, so out-of-the-box ``serve`` runs an immediate
+    one-shot scan plus a 12-hour background sync. Set ``FORGE_SYNC=false``
+    (or ``0``/``no``/``off``) to disable.
+    """
+    return _bool_env("FORGE_SYNC", True)
+
+
+def download_pdfs_enabled() -> bool:
+    """Read ``FORGE_DOWNLOAD_PDFS`` — opt-in to mirroring Forge PDFs locally.
+
+    Defaults to **off**: the scheduler / ``forge-scan`` only sync the
+    structured JSON detail by default. Set ``FORGE_DOWNLOAD_PDFS=true``
+    to additionally download every army-book PDF and drop it into the
+    watched directory for full-text indexing.
+    """
+    return _bool_env("FORGE_DOWNLOAD_PDFS", False)

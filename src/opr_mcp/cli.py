@@ -112,12 +112,21 @@ def serve(
         help="Directory of PDFs to ingest on startup and watch for changes. Created if missing.",
     ),
     forge_sync: bool = typer.Option(
-        False,
+        True,
         "--forge-sync/--no-forge-sync",
         envvar="FORGE_SYNC",
-        help="Periodically scan Army Forge for new/changed army-book PDFs and "
-             "drop them into <pdf-dir>/forge/. Interval is FORGE_INTERVAL_SECONDS "
-             "(default 12h).",
+        help="Sync structured army-roster data from Army Forge: an immediate "
+             "one-shot scan at startup plus a background re-scan every "
+             "FORGE_INTERVAL_SECONDS (default 12h). On by default; pass "
+             "--no-forge-sync (or FORGE_SYNC=false) to disable.",
+    ),
+    forge_download_pdfs: bool = typer.Option(
+        False,
+        "--forge-download-pdfs/--no-forge-download-pdfs",
+        envvar="FORGE_DOWNLOAD_PDFS",
+        help="Additionally download every army-book PDF from Forge into "
+             "<pdf-dir>/forge/ for full-text indexing. Off by default — "
+             "the JSON detail sync already covers unit / upgrade lookups.",
     ),
     transport: str = typer.Option(
         "auto",
@@ -134,13 +143,16 @@ def serve(
 
     Every PDF under ``--pdf-dir`` (env ``PDF_DIR``, default ``/pdf``) is ingested
     before the server starts, and the directory is watched for changes so the
-    index stays in sync while the server runs. The directory is created if it
-    does not exist.
+    index stays in sync while the server runs. Drop your own advanced-rules
+    or lore PDFs in there; the directory is created if it does not exist.
 
-    With ``--forge-sync`` (or ``FORGE_SYNC=1``), a background scheduler polls
-    Army Forge on the configured interval, downloads any (book, game-system)
-    pair whose ``renderId`` has changed since the last scan, and drops the PDFs
-    into the watched directory so the ingest pipeline picks them up.
+    With ``--forge-sync`` (the default; disable with ``--no-forge-sync`` or
+    ``FORGE_SYNC=false``), a background scheduler runs an immediate one-shot
+    scan at startup and re-scans every ``FORGE_INTERVAL_SECONDS`` (default 12h),
+    syncing structured unit / upgrade JSON from Army Forge. PDFs are NOT
+    downloaded by default — set ``--forge-download-pdfs`` (or
+    ``FORGE_DOWNLOAD_PDFS=true``) to additionally mirror army-book PDFs into
+    the watched directory.
     """
     configure_logging()
     if transport not in {"auto", "stdio", "http"}:
@@ -184,6 +196,7 @@ def serve(
             interval_seconds=fcfg.interval_seconds(),
             filters=fcfg.filters(),
             game_systems=allowed,
+            download_pdfs=forge_download_pdfs,
         ).start()
         # Run the retention sweep on its own (typically daily) interval. Tied
         # to forge_sync because it's the forge mirror that grows without
@@ -194,9 +207,9 @@ def serve(
         ).start()
 
     if host is not None:
-        os.environ["HOST"] = host
+        os.environ["SERVER_HOST"] = host
     if port is not None:
-        os.environ["PORT"] = str(port)
+        os.environ["SERVER_PORT"] = str(port)
 
     use_http = transport == "http" or (transport == "auto" and auth_enabled())
 
@@ -231,23 +244,32 @@ def _is_under(child: Path, parent: Path) -> bool:
 def forge_scan(
     pdf_dir: Path | None = typer.Option(
         None, "--pdf-dir", envvar="FORGE_PDF_DIR",
-        help="Where to download PDFs. Defaults to <PDF_DIR>/forge if "
-             "that env var is set, else a 'forge-pdfs' folder under the user "
-             "data dir.",
+        help="Where to download PDFs (only used with --download-pdfs). "
+             "Defaults to <PDF_DIR>/forge if that env var is set, else a "
+             "'forge-pdfs' folder under the user data dir.",
     ),
     no_download: bool = typer.Option(
         False, "--no-download",
-        help="Dry-run: update the forge_books table but don't download any PDFs "
-             "and don't prune stale rows.",
+        help="Dry-run: walk Forge but don't write to the DB or disk and "
+             "don't prune stale rows.",
+    ),
+    download_pdfs: bool = typer.Option(
+        False, "--download-pdfs/--no-download-pdfs",
+        envvar="FORGE_DOWNLOAD_PDFS",
+        help="Additionally mirror army-book PDFs to <pdf-dir>. Off by "
+             "default — the JSON detail sync alone covers unit / upgrade "
+             "lookups.",
     ),
 ) -> None:
-    """One-shot Army Forge scan: refresh the local PDF mirror.
+    """One-shot Army Forge scan: refresh structured unit / upgrade JSON.
 
     Honors ``FORGE_FILTERS`` (default ``official``) and ``FORGE_GAMES``
-    (default: every known game system). The scan enumerates every
+    (default ``gf,aof``). The scan enumerates every
     ``(book, game_system)`` pair where the book is enabled for that system
-    and downloads the ones whose ``renderId`` differs from what the DB last
-    recorded.
+    and re-syncs whichever pairs the listing's ``modifiedAt`` says have
+    changed since the last scan. By default only the JSON detail is fetched;
+    pass ``--download-pdfs`` (or set ``FORGE_DOWNLOAD_PDFS=true``) to also
+    mirror the rendered PDF for every changed pair.
     """
     configure_logging()
     from .forge import config as fcfg
@@ -261,6 +283,7 @@ def forge_scan(
         filters=fcfg.filters(),
         game_systems=fcfg.games(),
         download=not no_download,
+        download_pdfs=download_pdfs,
         prune=not no_download,
     )
     typer.echo(

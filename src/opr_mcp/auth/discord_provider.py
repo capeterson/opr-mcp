@@ -426,7 +426,7 @@ class DiscordOAuthProvider(
         grant_id = storage.new_grant_id()
         access = storage.new_token()
         refresh = storage.new_token()
-        # Initial issuance: now + REFRESH_TOKEN_TTL.
+        # Initial issuance: now + AUTH_REFRESH_TOKEN_TTL_SECONDS.
         # Refresh rotation: caller passes the existing absolute deadline, so the
         # grant cannot be extended indefinitely.
         refresh_expires = (

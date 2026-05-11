@@ -124,8 +124,8 @@ def test_open_auth_db_migrates_legacy_rows_from_content_db(tmp_path, monkeypatch
     open_auth_db() should copy them into auth.db on first open."""
     legacy = tmp_path / "opr.db"
     auth = tmp_path / "auth.db"
-    monkeypatch.setenv("DB", str(legacy))
-    monkeypatch.setenv("AUTH_DB", str(auth))
+    monkeypatch.setenv("DB_PATH", str(legacy))
+    monkeypatch.setenv("AUTH_DB_PATH", str(auth))
 
     # Stand up a legacy content DB with the old in-place auth tables and one row.
     content_conn = db.open_db(legacy)
@@ -155,8 +155,8 @@ def test_open_auth_db_does_not_overwrite_existing_rows(tmp_path, monkeypatch):
     auth.db when both files have data must not stomp the newer auth.db rows."""
     legacy = tmp_path / "opr.db"
     auth = tmp_path / "auth.db"
-    monkeypatch.setenv("DB", str(legacy))
-    monkeypatch.setenv("AUTH_DB", str(auth))
+    monkeypatch.setenv("DB_PATH", str(legacy))
+    monkeypatch.setenv("AUTH_DB_PATH", str(auth))
 
     # Seed auth.db with the canonical row first.
     auth_conn = db.open_auth_db(auth)
