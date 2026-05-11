@@ -30,6 +30,7 @@ from .tools import get_special_rule as get_special_rule_tool
 from .tools import lists as lists_tool
 from .tools import lookup_unit as lookup_unit_tool
 from .tools import search_rules as search_rules_tool
+from .tools import validate_army_list as validate_army_list_tool
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +39,72 @@ _conn = None
 _auth_provider = None
 
 _DEFAULT_INSTRUCTIONS_RESOURCE = "instructions.md"
+_INSTRUCTIONS_RESOURCE_URI = "opr://instructions/force-org"
 _cached_instructions: str | None = None
+
+# Short, ~80-token digest of the four AoF/GF force-org rules. Emitted by
+# ``_short_summary()`` in three places: the FastMCP handshake string, the
+# per-call ``force_org_reminder`` sibling field, and the nested
+# ``force_org_summary`` block on list-tool payloads. Wording is verified
+# only for AoF and GF (per ``instructions.md`` — other game systems like
+# Firefight, Skirmish, Quest, FTL may have different formulas), so the
+# scope claim is constrained accordingly.
+#
+# NOTE: if you change this, also update the 2-line preamble pasted into
+# the 5 army-building tool docstrings below.
+_FORCE_ORG_SUMMARY = (
+    "AoF / Grimdark Future force-org rules "
+    "(G = game size in pts; verified in both core rulebooks):\n"
+    "  1. HEROES         max floor(G/375) hero units\n"
+    "  2. DUPLICATES     max (1 + floor(G/750)) of the same unit "
+    "(combined units = 1)\n"
+    "  3. UNIT COST CAP  no single unit > 35% of G "
+    "(hero + attached unit = 1 unit)\n"
+    "  4. UNIT COUNT CAP max floor(G/150) units total\n"
+    "Call `force_org_guidance` for the full text and `validate_army_list` "
+    "before finalizing any list."
+)
+
+# Pointer used in place of ``_FORCE_ORG_SUMMARY`` when the operator has
+# overridden ``instructions.md`` via ``INSTRUCTIONS_FILE``. The hardcoded
+# AoF/GF digest would contradict whatever custom guidance the operator
+# loaded; degrade to a generic pointer that simply directs the model to
+# the dedicated tool/resource.
+_FORCE_ORG_SUMMARY_OVERRIDE_POINTER = (
+    "Custom force-org guidance is configured for this server. Call "
+    "`force_org_guidance` (or read the `opr://instructions/force-org` "
+    "resource) for the full rules before building any army list."
+)
+
+
+def _short_summary() -> str:
+    """Return the short summary for handshake / reminder / embed channels.
+
+    When ``INSTRUCTIONS_FILE`` is set, the operator's full guidance has
+    been customized — broadcasting the hardcoded AoF/GF digest in the
+    short channels would contradict it. Degrade to a pointer in that
+    case; the dedicated tool, resource, and first-call sibling still
+    deliver the full custom text.
+    """
+    if instructions_file() is not None:
+        return _FORCE_ORG_SUMMARY_OVERRIDE_POINTER
+    return _FORCE_ORG_SUMMARY
+
+
+def _handshake_instructions() -> str:
+    """Build the FastMCP ``instructions=`` handshake string lazily.
+
+    Built per-call so ``INSTRUCTIONS_FILE`` overrides take effect at
+    server-build time rather than module-import time.
+    """
+    return (
+        "This server provides One Page Rules army-book lookups. Before "
+        "building or validating any AoF or Grimdark Future army list, "
+        "call `force_org_guidance` to read the force-organization rules "
+        "— they apply to AoF/GF lists unless the user explicitly says "
+        "'ignore force org' or 'narrative list'.\n\n"
+        + _short_summary()
+    )
 
 # Sessions that have already received the auto-injected instructions on a
 # prior tool response. Keyed on the live ServerSession object so entries
@@ -47,9 +113,48 @@ _cached_instructions: str | None = None
 # trap a plain set[int] would have.
 _greeted_sessions: weakref.WeakSet[Any] = weakref.WeakSet()
 
+# Sessions that have actively acknowledged the force-org guidance by
+# calling either ``force_org_guidance`` or ``validate_army_list``. Distinct
+# from ``_greeted_sessions`` (which tracks passive first-call injection)
+# so the warning banner can escalate when the model has only been shown
+# the auto-injection but hasn't engaged with the dedicated channels.
+_acknowledged_sessions: weakref.WeakSet[Any] = weakref.WeakSet()
+
 
 def _reset_greeted_sessions_for_tests() -> None:
     _greeted_sessions.clear()
+
+
+def _reset_session_state_for_tests() -> None:
+    _greeted_sessions.clear()
+    _acknowledged_sessions.clear()
+
+
+def _ctx_session(ctx: Context | None):
+    if ctx is None:
+        return None
+    try:
+        return ctx.session
+    except Exception:
+        return None
+
+
+def _mark_acknowledged(ctx: Context | None) -> None:
+    session = _ctx_session(ctx)
+    if session is None:
+        return
+    with contextlib.suppress(TypeError):
+        _acknowledged_sessions.add(session)
+
+
+def _is_acknowledged(ctx: Context | None) -> bool:
+    session = _ctx_session(ctx)
+    if session is None:
+        return False
+    try:
+        return session in _acknowledged_sessions
+    except TypeError:
+        return False
 
 
 def _db():
@@ -82,10 +187,10 @@ def _load_instructions() -> str:
     return text
 
 
-def _finalize(payload, ctx: Context | None):
-    """Attach indexing status and (once per session) the full instructions.
+def _finalize(payload, ctx: Context | None, *, kind: str = "default"):
+    """Attach indexing status and force-org delivery channels to a response.
 
-    Two sibling fields may be added to a tool's response:
+    Up to four sibling fields may be added to a tool's response:
 
     * ``indexing``: a status block describing in-flight ingest. Returned
       whenever ``indexing_status.snapshot()`` reports a warning, regardless
@@ -95,10 +200,19 @@ def _finalize(payload, ctx: Context | None):
       session. This is how the model receives usage guidance under clients
       that drop the handshake ``instructions`` field or defer tool-schema
       loading (in which case the catalog isn't visible up front).
+    * ``force_org_reminder``: a short ~80-token digest of the four
+      force-org rules. Attached on every tool response when a Context is
+      present, so clients that strip first-call envelopes or compact
+      mid-session still see the rules at the next call.
+    * ``force_org_warning``: a banner string telling the model it has not
+      yet acknowledged the guidance via ``force_org_guidance`` or
+      ``validate_army_list``. Suppressed on the first call (where the
+      full ``instructions`` field already covers it) and on diagnostic
+      tools (``kind="diagnostic"``).
 
-    When neither block applies the bare payload is returned unchanged, so
-    idle responses keep their historical shape (see
-    ``test_with_status_returns_payload_unwrapped_when_idle``).
+    When no field applies the bare payload is returned unchanged, so
+    ctx-less callers (the ``_with_status`` shim, direct ``tool.fn()``
+    calls in tests) keep their historical shape.
     """
     snap = indexing_status.snapshot()
     warning = snap.warning()
@@ -108,11 +222,10 @@ def _finalize(payload, ctx: Context | None):
         status["warning"] = warning
 
     instructions_text: str | None = None
+    reminder_text: str | None = None
+    warning_text: str | None = None
     if ctx is not None:
-        try:
-            session = ctx.session
-        except Exception:
-            session = None
+        session = _ctx_session(ctx)
         if session is not None:
             try:
                 already_greeted = session in _greeted_sessions
@@ -126,7 +239,24 @@ def _finalize(payload, ctx: Context | None):
                 with contextlib.suppress(TypeError):
                     _greeted_sessions.add(session)
 
-    if status is None and instructions_text is None:
+            reminder_text = _short_summary()
+            if (
+                instructions_text is None
+                and kind != "diagnostic"
+                and not _is_acknowledged(ctx)
+            ):
+                warning_text = (
+                    "You have not yet acknowledged the force-org guidance "
+                    "for this session. Call `force_org_guidance` before "
+                    "finalizing any army list."
+                )
+
+    if (
+        status is None
+        and instructions_text is None
+        and reminder_text is None
+        and warning_text is None
+    ):
         return payload
 
     if isinstance(payload, list):
@@ -142,7 +272,34 @@ def _finalize(payload, ctx: Context | None):
         result["indexing"] = status
     if instructions_text is not None:
         result["instructions"] = instructions_text
+    if reminder_text is not None:
+        result["force_org_reminder"] = reminder_text
+    if warning_text is not None:
+        result["force_org_warning"] = warning_text
     return result
+
+
+def _embed_force_org_summary(payload):
+    """Nest a structured ``force_org_summary`` block inside a payload.
+
+    Sibling fields like ``force_org_reminder`` are stripped by some clients
+    that only forward known top-level keys. Embedding the same digest
+    inside the documented payload schema means it travels as part of the
+    tool's structured content — much harder for a client to drop.
+
+    Applied only to the three list-shaped army-building tools
+    (``list_armies``, ``list_units``, ``lookup_unit``); rule-text tools
+    don't get it because the digest would be off-topic next to a rule
+    definition.
+    """
+    block = {"rules": _short_summary(), "see_also": "force_org_guidance"}
+    if isinstance(payload, list):
+        return {"results": payload, "force_org_summary": block}
+    if isinstance(payload, dict):
+        merged = dict(payload)
+        merged["force_org_summary"] = block
+        return merged
+    return payload
 
 
 def _with_status(payload):
@@ -159,6 +316,7 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     if with_auth is None:
         return FastMCP(
             "opr",
+            instructions=_handshake_instructions(),
             host=http_host(),
             port=http_port(),
         )
@@ -194,6 +352,7 @@ def _build_mcp(*, with_auth: AuthConfig | None) -> FastMCP:
     )
     return FastMCP(
         "opr",
+        instructions=_handshake_instructions(),
         auth_server_provider=_auth_provider,
         auth=auth_settings,
         host=http_host(),
@@ -211,7 +370,12 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         version: str | None = None,
         ctx: Context | None = None,
     ) -> Any:
-        """Free-text hybrid search across all ingested OPR rule chunks.
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
+
+        Free-text hybrid search across all ingested OPR rule chunks.
 
         Use this for questions about how a rule works, comparing rules, or finding
         content across multiple sources. Prefer ``lookup_unit`` if the user names a
@@ -246,7 +410,12 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         include_rule_text: bool = False,
         ctx: Context | None = None,
     ) -> Any:
-        """Look up an OPR unit by name. Returns full unit profile in one call.
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
+
+        Look up an OPR unit by name. Returns full unit profile in one call.
 
         Use this when the user names a specific unit. Returns multiple rows
         when the same name appears in multiple armies, and each row carries
@@ -283,13 +452,15 @@ def _register_tools(mcp_obj: FastMCP) -> None:
                 per rule. Default false to keep the response small.
         """
         return _finalize(
-            lookup_unit_tool.run(
-                _db(),
-                name,
-                army=army,
-                game_system=game_system,
-                version=version,
-                include_rule_text=include_rule_text,
+            _embed_force_org_summary(
+                lookup_unit_tool.run(
+                    _db(),
+                    name,
+                    army=army,
+                    game_system=game_system,
+                    version=version,
+                    include_rule_text=include_rule_text,
+                )
             ),
             ctx,
         )
@@ -302,7 +473,12 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         version: str | None = None,
         ctx: Context | None = None,
     ) -> Any:
-        """Look up a single special rule by exact name (case-insensitive).
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
+
+        Look up a single special rule by exact name (case-insensitive).
 
         Strips parametric suffixes, so "Tough(3)" and "Tough" both resolve to the
         same rule definition. Use this when the user asks "what does X do?" for a
@@ -324,8 +500,17 @@ def _register_tools(mcp_obj: FastMCP) -> None:
 
     @mcp_obj.tool()
     def list_armies(ctx: Context | None = None) -> Any:
-        """List every army present in the index, with document and unit counts."""
-        return _finalize(lists_tool.list_armies(_db()), ctx)
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
+
+        List every army present in the index, with document and unit counts.
+        """
+        return _finalize(
+            _embed_force_org_summary(lists_tool.list_armies(_db())),
+            ctx,
+        )
 
     @mcp_obj.tool()
     def list_units(
@@ -336,7 +521,12 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         include_rule_text: bool = False,
         ctx: Context | None = None,
     ) -> Any:
-        """List all units for a given army (case-insensitive match on army name).
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
+
+        List all units for a given army (case-insensitive match on army name).
 
         Default response is a lightweight roster with five fields per unit
         (``name``, ``base_points``, ``qty``, ``quality``, ``defense``). Pass
@@ -361,13 +551,15 @@ def _register_tools(mcp_obj: FastMCP) -> None:
                 dicts. Default false.
         """
         return _finalize(
-            lists_tool.list_units(
-                _db(),
-                army,
-                game_system=game_system,
-                version=version,
-                details=details,
-                include_rule_text=include_rule_text,
+            _embed_force_org_summary(
+                lists_tool.list_units(
+                    _db(),
+                    army,
+                    game_system=game_system,
+                    version=version,
+                    details=details,
+                    include_rule_text=include_rule_text,
+                )
             ),
             ctx,
         )
@@ -393,7 +585,66 @@ def _register_tools(mcp_obj: FastMCP) -> None:
         warning = snap.warning()
         if warning is not None:
             out["warning"] = warning
-        return _finalize(out, ctx)
+        return _finalize(out, ctx, kind="diagnostic")
+
+    @mcp_obj.tool()
+    def force_org_guidance(ctx: Context | None = None) -> str:
+        """Return the full force-organization guidance for OPR army building.
+
+        Call this once per session BEFORE constructing or validating any
+        army list. The returned text covers force-org limits (heroes,
+        duplicates, unit cost cap, unit count cap), hero-attachment rules,
+        and the mandatory pre-finalization checklist. Calling this tool
+        also acknowledges the guidance for the session, silencing the
+        ``force_org_warning`` banner on subsequent tool responses.
+        """
+        _mark_acknowledged(ctx)
+        return _load_instructions()
+
+    @mcp_obj.tool()
+    def validate_army_list(
+        game_size_pts: int,
+        units: list[dict],
+        ctx: Context | None = None,
+    ) -> dict:
+        """Check a proposed AoF / Grimdark Future army list against the
+        force-org rules.
+
+        The four force-org rules are verified for AoF and GF only — do
+        not feed lists from other game systems (Firefight, Skirmish,
+        Quest, FTL) into this tool. Returns the mandatory
+        pre-finalization checklist with computed values and a pass/fail
+        per rule. Calling this tool acknowledges the force-org guidance
+        for the session.
+
+        IMPORTANT: ``copies`` is the NUMBER OF ROSTER COPIES of a unit
+        card you are bringing (default 1). Do NOT pass the unit card's
+        ``qty`` field here — that's the model count printed on the
+        card, which would make a 10-model Warriors unit count as 10
+        separate roster entries.
+
+        Args:
+            game_size_pts: Game size in points (G).
+            units: List of unit entries. Each entry is a dict with keys:
+                ``unit_name`` (str, required), ``total_pts`` (int,
+                required; unit cost incl. upgrades, EXCL. attached hero),
+                ``copies`` (int >= 1, default 1; number of roster copies
+                of this card), ``attached_hero_name`` (str | None),
+                ``attached_hero_pts`` (int | None; required when
+                ``attached_hero_name`` is set), ``attached_hero_tough``
+                (int | None; for the Tough(6) attachment-eligibility
+                check), and ``is_hero`` (bool, default False; True for
+                stand-alone hero entries).
+        """
+        _mark_acknowledged(ctx)
+        return validate_army_list_tool.run(game_size_pts, units)
+
+    @mcp_obj.resource(_INSTRUCTIONS_RESOURCE_URI, mime_type="text/markdown")
+    def force_org_guidance_resource() -> str:
+        """The same content as the ``force_org_guidance`` tool, exposed as
+        an MCP resource for clients that prefer resource-based discovery.
+        """
+        return _load_instructions()
 
 
 def _register_discord_callback(mcp_obj: FastMCP) -> None:
