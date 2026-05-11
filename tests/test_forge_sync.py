@@ -861,3 +861,174 @@ def test_sync_pruning_drops_synthetic_api_document(tmp_db, tmp_path):
     assert conn.execute(
         "SELECT COUNT(*) FROM units WHERE document_id = ?", (syn_doc["id"],),
     ).fetchone()[0] == 0
+
+
+def test_sync_continues_detail_when_pdf_resolve_fails(tmp_db, tmp_path):
+    """A /pdf resolve failure must not block the detail ingest — Forge's
+    JSON detail endpoint is independent and authoritative for unit
+    rows, so a transient CDN problem can't be allowed to keep stale
+    units around.
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("U1", "Beastmen", [4])
+
+    def boom(uid: str, gid: int):
+        raise api.ArmyForgeError("pdf 503")
+
+    with (
+        patch.object(api, "fetch_book_detail",
+                     return_value=_detail_payload(uid="U1")),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=boom),
+        patch.object(sync, "_http_download",
+                     side_effect=AssertionError("must not run on failed resolve")),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert any("pdf 503" in err for _, err in stats.failed)
+    assert stats.details_synced == 1
+    # Synthetic doc + units landed despite the PDF failure.
+    syn = conn.execute(
+        "SELECT id FROM documents WHERE path = 'forge-api://U1~4'",
+    ).fetchone()
+    assert syn is not None
+    assert conn.execute(
+        "SELECT COUNT(*) FROM units WHERE document_id = ?", (syn["id"],),
+    ).fetchone()[0] > 0
+
+
+def test_sync_continues_detail_when_pdf_download_fails(tmp_db, tmp_path):
+    """Same independence requirement for download failures."""
+    conn = db.open_db(tmp_db)
+    book = _book("U1", "Beastmen", [4])
+
+    def boom(url: str, dest):
+        raise OSError("network down")
+
+    with (
+        patch.object(api, "fetch_book_detail",
+                     return_value=_detail_payload(uid="U1")),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=boom),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert any("network down" in err for _, err in stats.failed)
+    assert stats.details_synced == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM units WHERE army = 'Beastmen'",
+    ).fetchone()[0] > 0
+
+
+def test_sync_rolls_back_partial_detail_ingest_on_failure(tmp_db, tmp_path):
+    """If ingest_forge_book fails mid-write (e.g. after it has updated
+    the synthetic documents row and deleted the old units), the catch
+    must ROLLBACK the SAVEPOINT so the per-pair commit doesn't ship a
+    half-replaced book. The previous units must survive.
+    """
+    from opr_mcp.ingest import forge_book
+
+    conn = db.open_db(tmp_db)
+    book = _book("U1", "Beastmen", [4])
+
+    # First successful sync seeds units.
+    with (
+        patch.object(api, "fetch_book_detail",
+                     return_value=_detail_payload(uid="U1")),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+    before = conn.execute("SELECT name FROM units").fetchall()
+    assert [r["name"] for r in before] == ["Cult Leader"]
+
+    # Force ingest_forge_book to blow up partway through — after the doc
+    # row has been updated and the old units have been deleted, but
+    # before the new units are inserted. Real_ingest captures state for
+    # us to inspect; the wrapper raises after running it.
+    real_ingest = forge_book.ingest_forge_book
+
+    def exploding_ingest(*args, **kwargs):
+        real_ingest(*args, **kwargs)
+        raise RuntimeError("simulated mid-write SQLite error")
+
+    book_v2 = _book("U1", "Beastmen", [4],
+                    modified_at="2026-06-01T00:00:00Z")
+    with (
+        patch.object(forge_book, "ingest_forge_book",
+                     side_effect=exploding_ingest),
+        patch.object(api, "fetch_book_detail",
+                     return_value=_detail_payload(uid="U1")),
+        patch.object(api, "list_books", return_value=[book_v2]),
+        patch.object(api, "resolve_pdf",
+                     side_effect=lambda u, g: _stub_resolve(u, g, "RID2")),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert any("simulated mid-write" in err for _, err in stats.failed)
+    assert stats.details_synced == 0
+    after = conn.execute("SELECT name FROM units ORDER BY name").fetchall()
+    # The pre-existing unit is still present — the savepoint rolled back
+    # the half-replaced state.
+    assert [r["name"] for r in after] == ["Cult Leader"]
+
+
+def test_sync_bumps_only_latest_render_row(tmp_db, tmp_path):
+    """After a book has multiple retained renders, the unchanged-pair
+    bump must touch only the latest render row's last_checked — bumping
+    every historical row would tie ``_latest_row()``'s ORDER BY and let
+    an old render get returned with a stale modified_at.
+    """
+    conn = db.open_db(tmp_db)
+    book_v1 = _book("U1", "Beastmen", [4], modified_at="2026-01-01T00:00:00Z")
+    book_v2 = _book("U1", "Beastmen", [4], modified_at="2026-02-01T00:00:00Z")
+
+    with (
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book_v1]),
+        patch.object(api, "resolve_pdf",
+                     side_effect=lambda u, g: _stub_resolve(u, g, "RID1")),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    with (
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book_v2]),
+        patch.object(api, "resolve_pdf",
+                     side_effect=lambda u, g: _stub_resolve(u, g, "RID2")),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    rid1_checked_after_two = conn.execute(
+        "SELECT last_checked FROM forge_books "
+        "WHERE uid='U1' AND render_id='RID1'",
+    ).fetchone()["last_checked"]
+
+    # Third scan with same modifiedAt as v2 → unchanged. The bump must
+    # NOT advance RID1's last_checked.
+    with (
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book_v2]),
+        patch.object(api, "resolve_pdf",
+                     side_effect=AssertionError("must not be called")),
+        patch.object(sync, "_http_download",
+                     side_effect=AssertionError("must not be called")),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    rid1_checked_after_three = conn.execute(
+        "SELECT last_checked FROM forge_books "
+        "WHERE uid='U1' AND render_id='RID1'",
+    ).fetchone()["last_checked"]
+    rid2_checked_after_three = conn.execute(
+        "SELECT last_checked FROM forge_books "
+        "WHERE uid='U1' AND render_id='RID2'",
+    ).fetchone()["last_checked"]
+
+    assert rid1_checked_after_three == rid1_checked_after_two
+    assert rid2_checked_after_three >= rid1_checked_after_three

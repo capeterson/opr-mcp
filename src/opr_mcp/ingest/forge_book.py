@@ -37,8 +37,31 @@ def synthetic_path(uid: str, game_system: int) -> str:
     return f"forge-api://{uid}~{game_system}"
 
 
-def _fingerprint(uid: str, game_system: int, modified_at: str | None) -> str:
-    seed = f"{uid}~{game_system}@{modified_at or ''}"
+def _fingerprint(
+    uid: str, game_system: int, modified_at: str | None, detail: dict,
+) -> str:
+    """Stable per-revision fingerprint for the synthetic documents row.
+
+    Two cases:
+
+    * ``modified_at`` is set (the normal path): hash just
+      ``uid~gs@modifiedAt``. Stable across runs, so a re-fetch with the
+      same upstream timestamp short-circuits at the existing ``sha256``
+      and avoids churning ``units`` / ``unit_upgrades`` rowids.
+    * ``modified_at`` is null/empty (degenerate case — Forge listing
+      sometimes omits the field): hash the full detail payload too. If
+      it really hasn't changed we still skip the rewrite, but a payload
+      drift produces a different sha and forces re-ingest. The
+      previous version of this function used a constant seed in this
+      case, which meant once a sha was recorded for an
+      ``modified_at = NULL`` book, every subsequent detail fetch was a
+      no-op even after the book's content changed.
+    """
+    if modified_at:
+        seed = f"{uid}~{game_system}@{modified_at}"
+    else:
+        body = json.dumps(detail, sort_keys=True, ensure_ascii=False)
+        seed = f"{uid}~{game_system}@-:{body}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
@@ -205,7 +228,7 @@ def ingest_forge_book(
     game_system_slug = api.GAME_SYSTEMS.get(game_system)
 
     path = synthetic_path(uid, game_system)
-    digest = _fingerprint(uid, game_system, modified_at)
+    digest = _fingerprint(uid, game_system, modified_at, detail)
     now = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
 
     existing = conn.execute(

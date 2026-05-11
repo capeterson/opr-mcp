@@ -22,6 +22,7 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from .forge import sync as forge_sync
+from .ingest import forge_book
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +101,11 @@ def sweep(
         for r in group[retain_versions:]:
             to_drop.append((r, "version"))
 
+    # Track pairs whose every row we dropped — after the sweep those
+    # need their synthetic forge-api:// documents removed too, otherwise
+    # JSON-sourced units for an out-of-scope game system stay queryable
+    # via lookup_unit / list_units.
+    dropped_pairs: set[tuple[str, int]] = set()
     for r, reason in to_drop:
         try:
             ok = forge_sync._drop_forge_version(
@@ -123,6 +129,23 @@ def sweep(
             stats.pruned_out_of_scope += 1
         else:
             stats.pruned_old_versions += 1
+        dropped_pairs.add((r["uid"], r["game_system"]))
+        conn.commit()
+
+    # For any (uid, game_system) whose last forge_books row we removed,
+    # drop the synthetic forge-api:// document so its units / upgrades
+    # cascade away. Books with surviving render rows (e.g. version-cap
+    # pruning that kept the newest N) keep their synthetic doc.
+    for uid, gid in dropped_pairs:
+        remaining = conn.execute(
+            "SELECT 1 FROM forge_books WHERE uid = ? AND game_system = ? LIMIT 1",
+            (uid, gid),
+        ).fetchone()
+        if remaining is not None:
+            continue
+        forge_sync._delete_ingested_document(
+            conn, path=forge_book.synthetic_path(uid, gid),
+        )
         conn.commit()
 
     log.info(

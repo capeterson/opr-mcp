@@ -40,6 +40,17 @@ def filtered_document_ids(
     sees stale historical content alongside the current one. Pass
     ``version`` explicitly to opt out and search a specific version.
 
+    A single logical Forge book can split across two physical documents:
+    the PDF (owns ``chunks`` / ``special_rules``) and the synthetic
+    ``forge-api://`` doc (owns ``units`` / ``unit_upgrades``). Both are
+    typically tagged with the same ``versionString`` and tie on the
+    version sort, so this function returns *every* doc whose version
+    matches the top-of-bucket — callers JOIN to whichever table they
+    care about and naturally land on the doc that actually carries the
+    data. Returning only one would let the more-recently-ingested PDF
+    doc (with no units when ``FORGE_INGEST_PDF_UNITS`` is off) shadow
+    the forge-api doc.
+
     ``game_system`` / ``army`` are optional further restrictors. An empty
     list means "filter matched zero docs" — caller should short-circuit.
     """
@@ -70,7 +81,14 @@ def filtered_document_ids(
             key=lambda r: (_version_key(r["version"]), r["ingested_at"] or ""),
             reverse=True,
         )
-        out.append(group[0]["id"])
+        top_version = _version_key(group[0]["version"])
+        # Pick every doc at the top version, not just one. Same-version
+        # forge-api + PDF docs both belong to the "latest" Forge book —
+        # excluding the API doc would leave unit queries empty when the
+        # PDF doc happened to be ingested later.
+        for r in group:
+            if _version_key(r["version"]) == top_version:
+                out.append(r["id"])
     return out
 
 

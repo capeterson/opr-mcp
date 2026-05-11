@@ -402,21 +402,23 @@ def _bump_last_checked(
     *,
     uid: str,
     gid: int,
+    render_id: str,
     upstream_modified: str | None,
     now: str,
 ) -> None:
-    """Mark the (uid, gs) rows as observed this scan without changing
-    anything else.
+    """Mark a specific render row as observed this scan.
 
-    Used for the unchanged-pair path. Also backfills ``modified_at`` in
-    case it wasn't recorded on a prior scan (e.g. a row written by an
-    older build that didn't have the column).
+    Scoped to ``render_id`` so retained historical rows aren't refreshed
+    along with the current one — :func:`_latest_row` orders by
+    ``last_checked DESC`` and would tie (and pick arbitrarily) if every
+    row got the same bump. Also backfills ``modified_at`` in case the
+    row was written by an older build without the column populated.
     """
     conn.execute(
         "UPDATE forge_books SET last_checked = ?, "
         "modified_at = COALESCE(modified_at, ?) "
-        "WHERE uid = ? AND game_system = ?",
-        (now, upstream_modified, uid, gid),
+        "WHERE uid = ? AND game_system = ? AND render_id = ?",
+        (now, upstream_modified, uid, gid, render_id),
     )
 
 
@@ -443,69 +445,91 @@ def _process_pair(
     detail_outdated = _detail_needs_refresh(latest, upstream_modified)
 
     if not pdf_outdated and not detail_outdated:
+        # latest is guaranteed non-None here: _pdf_needs_refresh returns
+        # True whenever the row is missing.
         _bump_last_checked(
-            conn, uid=uid, gid=gid, upstream_modified=upstream_modified, now=now,
+            conn, uid=uid, gid=gid,
+            render_id=latest["render_id"],
+            upstream_modified=upstream_modified, now=now,
         )
         conn.commit()
         stats.unchanged += 1
         return
 
+    # PDF and detail are independent network paths; a failure on one
+    # must NOT block the other. JSON detail is the authoritative source
+    # for unit rows now, so a transient PDF/CDN problem can't be allowed
+    # to keep stale units around.
     pdf_changed_disk = False
+    pdf_persisted = False
     if pdf_outdated:
         resolved = _resolve_pdf_safe(book, gid, label, stats)
-        if resolved is None:
-            return
-        url, pdf_name, pdf_path = resolved
-        new_render_id = api.render_id_from_path(pdf_path)
-        local = pdf_dir / local_filename(book, gid, new_render_id)
-        same_render = latest is not None and latest["render_id"] == new_render_id
-        local_exists = local.exists()
-        needs_download = not (same_render and local_exists)
+        if resolved is not None:
+            url, pdf_name, pdf_path = resolved
+            new_render_id = api.render_id_from_path(pdf_path)
+            local = pdf_dir / local_filename(book, gid, new_render_id)
+            same_render = latest is not None and latest["render_id"] == new_render_id
+            local_exists = local.exists()
+            needs_download = not (same_render and local_exists)
 
-        if needs_download and not download:
-            # Dry-run: count the change, don't persist (so the next real
-            # scan re-detects and actually downloads).
-            if is_new:
-                stats.new += 1
+            ok_to_persist = False
+            if needs_download and not download:
+                # Dry-run: count the change, don't persist (so the next
+                # real scan re-detects and actually downloads).
+                if is_new:
+                    stats.new += 1
+                else:
+                    stats.changed += 1
+            elif needs_download:
+                try:
+                    size = _http_download(url, local)
+                except Exception as exc:  # noqa: BLE001 — network errors vary
+                    stats.failed.append((label, f"download: {exc}"))
+                    log.warning(
+                        "forge: download failed for %s (gs=%d): %s",
+                        uid, gid, exc,
+                    )
+                else:
+                    log.info(
+                        "forge: %s %s gs=%d -> %s (%.1f KiB)",
+                        "added" if is_new else "updated",
+                        label, gid, local.name, size / 1024,
+                    )
+                    pdf_changed_disk = True
+                    ok_to_persist = True
             else:
-                stats.changed += 1
-            return
+                # Same render + local file present; just refresh the row
+                # so its modified_at catches up.
+                ok_to_persist = True
 
-        if needs_download:
-            try:
-                size = _http_download(url, local)
-            except Exception as exc:  # noqa: BLE001 — network errors vary
-                stats.failed.append((label, f"download: {exc}"))
-                log.warning(
-                    "forge: download failed for %s (gs=%d): %s", uid, gid, exc,
+            if ok_to_persist:
+                last_changed = now if pdf_changed_disk or is_new else (
+                    latest["last_changed"] if latest else now
                 )
-                return
-            log.info(
-                "forge: %s %s gs=%d -> %s (%.1f KiB)",
-                "added" if is_new else "updated",
-                label, gid, local.name, size / 1024,
-            )
-            pdf_changed_disk = True
+                _persist_pdf_row(
+                    conn,
+                    book=book, gid=gid, render_id=new_render_id,
+                    pdf_name=pdf_name, pdf_path=pdf_path,
+                    local_path=str(local),
+                    upstream_modified=upstream_modified, now=now,
+                    last_changed=last_changed,
+                )
+                pdf_persisted = True
+                if is_new:
+                    stats.new += 1
+                elif pdf_changed_disk and not same_render:
+                    stats.changed += 1
 
-        last_changed = now if pdf_changed_disk or is_new else (
-            latest["last_changed"] if latest else now
-        )
-        _persist_pdf_row(
-            conn,
-            book=book, gid=gid, render_id=new_render_id,
-            pdf_name=pdf_name, pdf_path=pdf_path, local_path=str(local),
-            upstream_modified=upstream_modified, now=now,
-            last_changed=last_changed,
-        )
-        if is_new:
-            stats.new += 1
-        elif pdf_changed_disk and not same_render:
-            stats.changed += 1
-    else:
-        # PDF is current; just bump bookkeeping so the unchanged-then-
-        # detail-only path doesn't leave modified_at stale.
+    # When PDF is current OR its leg failed but a row already exists,
+    # bump the row's last_checked so subsequent _latest_row() lookups
+    # still find the current render row. We only touch the row that was
+    # already the latest — bumping every historical render's last_checked
+    # would make the next scan's ordering ambiguous.
+    if not pdf_persisted and latest is not None:
         _bump_last_checked(
-            conn, uid=uid, gid=gid, upstream_modified=upstream_modified, now=now,
+            conn, uid=uid, gid=gid,
+            render_id=latest["render_id"],
+            upstream_modified=upstream_modified, now=now,
         )
 
     if detail_outdated:
@@ -522,6 +546,12 @@ def _process_pair(
                     label, gid, exc,
                 )
             else:
+                # SAVEPOINT around the detail ingest so a mid-write
+                # failure (malformed payload, SQLite error after we've
+                # already deleted the old units) doesn't leak a half-
+                # replaced synthetic doc out through the per-pair commit
+                # below. RELEASE on success, ROLLBACK TO on failure.
+                conn.execute("SAVEPOINT forge_detail")
                 try:
                     forge_book.ingest_forge_book(
                         conn,
@@ -534,12 +564,16 @@ def _process_pair(
                         detail_synced_at=now,
                         detail_modified_at=upstream_modified,
                     )
-                    stats.details_synced += 1
                 except Exception as exc:  # noqa: BLE001
+                    conn.execute("ROLLBACK TO SAVEPOINT forge_detail")
+                    conn.execute("RELEASE SAVEPOINT forge_detail")
                     stats.failed.append((label, f"detail-ingest: {exc}"))
                     log.exception(
                         "forge: detail ingest failed for %s (gs=%d)", label, gid,
                     )
+                else:
+                    conn.execute("RELEASE SAVEPOINT forge_detail")
+                    stats.details_synced += 1
 
     # Per-pair commit so concurrent readers see incremental progress and
     # we don't hold the write lock across the whole scan.

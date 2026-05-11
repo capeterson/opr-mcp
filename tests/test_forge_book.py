@@ -247,3 +247,67 @@ def test_units_are_compatible_with_enrich_unit_rows(tmp_db):
     assert payload["rules"] == ["Hero", "Tough(3)"]
     assert payload["upgrade_groups"][0]["kind"] == "Replace Sharp Claws"
     assert payload["upgrade_groups"][0]["options"][0]["points_cost"] == 5
+
+
+def test_fingerprint_changes_when_modified_at_missing_and_payload_changes(tmp_db):
+    """Without a ``modifiedAt`` to key on, the fingerprint must hash
+    the detail payload itself — otherwise the digest would be a fixed
+    ``uid~gs@`` constant and ``ingest_forge_book`` would short-circuit
+    on every subsequent fetch, even after the upstream book changed.
+    """
+    conn = db.open_db(tmp_db)
+    detail_v1 = _detail()
+    detail_v1["modifiedAt"] = None
+    forge_book.ingest_forge_book(
+        conn, book_meta=_book_meta(), game_system=4,
+        detail=detail_v1, modified_at=None,
+    )
+    conn.commit()
+    units_v1 = [
+        r["name"] for r in conn.execute("SELECT name FROM units ORDER BY name")
+    ]
+    assert "Champion" in units_v1
+
+    detail_v2 = _detail()
+    detail_v2["modifiedAt"] = None
+    # Drop the Champion in v2 — the rewrite must take effect.
+    detail_v2["units"] = [
+        u for u in detail_v2["units"] if u["name"] != "Champion"
+    ]
+    forge_book.ingest_forge_book(
+        conn, book_meta=_book_meta(), game_system=4,
+        detail=detail_v2, modified_at=None,
+    )
+    conn.commit()
+    units_v2 = [
+        r["name"] for r in conn.execute("SELECT name FROM units ORDER BY name")
+    ]
+    assert units_v2 == ["Cult Leader"]
+
+
+def test_fingerprint_stable_when_modified_at_missing_and_payload_unchanged(tmp_db):
+    """Counterpart to the previous test: payload bit-identical and
+    modifiedAt absent on both calls ⇒ digest matches ⇒ no-op (the
+    documents row id is reused and unit rowids stay put).
+    """
+    conn = db.open_db(tmp_db)
+    detail = _detail()
+    detail["modifiedAt"] = None
+    first_id = forge_book.ingest_forge_book(
+        conn, book_meta=_book_meta(), game_system=4,
+        detail=detail, modified_at=None,
+    )
+    conn.commit()
+    before = conn.execute(
+        "SELECT id FROM units WHERE document_id = ?", (first_id,),
+    ).fetchall()
+    second_id = forge_book.ingest_forge_book(
+        conn, book_meta=_book_meta(), game_system=4,
+        detail=detail, modified_at=None,
+    )
+    conn.commit()
+    assert second_id == first_id
+    after = conn.execute(
+        "SELECT id FROM units WHERE document_id = ?", (first_id,),
+    ).fetchall()
+    assert [r["id"] for r in before] == [r["id"] for r in after]
