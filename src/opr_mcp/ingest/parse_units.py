@@ -294,15 +294,15 @@ def _strip_inprofile_heading(line: str) -> tuple[str | None, str]:
             prefix = h + sep
             if norm.startswith(prefix):
                 remainder = s[len(prefix):].strip()
-                if h in _AMBIGUOUS_PREFIX_HEADINGS:
-                    # Only strip when the remainder is a single
-                    # equipment token (``Melee Rifle (24", A1)``);
-                    # leave alone when the remainder looks like a
-                    # comma-rules list or a bare TitleCase rule
-                    # extension (``Evasion, Scout, Shadowborn`` /
-                    # ``Slayer``).
-                    if not _EQUIP_TOKEN_RE.fullmatch(remainder):
-                        return None, s
+                # For ambiguous short-prefix headings (``melee`` /
+                # ``ranged``), only strip when the remainder is a
+                # single equipment token (``Melee Rifle (24", A1)``);
+                # leave alone when the remainder looks like a comma-
+                # rules list or a bare TitleCase rule extension
+                # (``Evasion, Scout, Shadowborn`` / ``Slayer``).
+                if (h in _AMBIGUOUS_PREFIX_HEADINGS
+                        and not _EQUIP_TOKEN_RE.fullmatch(remainder)):
+                    return None, s
                 return kind, remainder
     return None, s
 

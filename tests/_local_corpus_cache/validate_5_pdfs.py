@@ -146,10 +146,7 @@ def _equipment_names(unit) -> list[str]:
     eq = unit.get("equipment") or unit.get("equipment_json") or []
     out = []
     for e in eq:
-        if isinstance(e, dict):
-            n = e.get("name") or e.get("text")
-        else:
-            n = str(e)
+        n = e.get("name") or e.get("text") if isinstance(e, dict) else str(e)
         if n:
             out.append(n.strip())
     return out
@@ -159,10 +156,10 @@ def _rule_names(unit) -> list[str]:
     rs = unit.get("rules") or unit.get("rules_json") or []
     out = []
     for r in rs:
-        if isinstance(r, dict):
-            n = r.get("name") or r.get("text") or json.dumps(r)
-        else:
-            n = str(r)
+        n = (
+            r.get("name") or r.get("text") or json.dumps(r)
+            if isinstance(r, dict) else str(r)
+        )
         out.append(n.strip())
     return out
 
@@ -253,7 +250,7 @@ def validate_giants():
     actual_names = {u.get("name") for u in (rows or []) if isinstance(u, dict)}
     missing = expected_unit_names - actual_names
     claim(pdf, "list_units",
-          f"list_units returns all 8 named giants",
+          "list_units returns all 8 named giants",
           sorted(expected_unit_names), sorted(actual_names),
           not missing, f"missing: {sorted(missing)}" if missing else "")
 
@@ -758,7 +755,7 @@ def validate_list_armies():
             if isinstance(r, dict):
                 key = (r.get("army"), r.get("game_system"))
                 by_name[key] = r
-    for fn, gs, army, version, _pages in DOCS:
+    for fn, gs, army, _version, _pages in DOCS:
         ok = (army, gs) in by_name
         claim(fn, "list_armies",
               f"list_armies includes ({army!r}, {gs!r})",

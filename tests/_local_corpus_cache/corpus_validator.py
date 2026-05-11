@@ -242,7 +242,6 @@ def extract_unit_listing(pages: list[tuple[int, list[str]]]) -> dict[str, dict]:
             q = d = None
             pts = None
             equipment_lines: list[str] = []
-            rules_line: str | None = None
             window: list[str] = []
             for j in range(i + 1, min(i + 16, len(lines))):
                 cell = lines[j].strip()
@@ -629,10 +628,7 @@ def compare_units(gt_cards: list[GTUnit], dump_units: list[dict],
         # listed alongside the weapons).
         u_eq_names = set()
         for e in u.get("equipment") or u.get("equipment_json") or []:
-            if isinstance(e, dict):
-                en = e.get("name") or ""
-            else:
-                en = str(e)
+            en = e.get("name") or "" if isinstance(e, dict) else str(e)
             # Drop any leading ``Nx `` count prefix to canonicalize.
             en = re.sub(r"^\d+x\s+", "", en).strip().lower()
             if en:
@@ -730,12 +726,12 @@ def validate_pdf(filename: str) -> list[dict]:
     # Cross-stamp listing values onto cards (for additional checks not
     # used in the per-card pass right now).
     for c in cards:
-        l = listing.get(c.name)
-        if l:
-            c.listing_qty = l["qty"]
-            c.listing_pts = l["base_points"]
-            c.listing_quality = l["quality"]
-            c.listing_defense = l["defense"]
+        listed = listing.get(c.name)
+        if listed:
+            c.listing_qty = listed["qty"]
+            c.listing_pts = listed["base_points"]
+            c.listing_quality = listed["quality"]
+            c.listing_defense = listed["defense"]
     findings = compare_units(cards, dump.get("units", []), filename)
     findings += compare_glossary_rules(
         extract_glossary_rules(pages),
