@@ -87,9 +87,8 @@ def _discord_handler_ok(*, user_id: str = "U1", guild_ids: list[str] | None = No
 
 
 @pytest.fixture
-async def provider(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def provider(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config()
     p = DiscordOAuthProvider(cfg, store, http_client_factory=_httpx_factory(_discord_handler_ok()))
@@ -149,11 +148,10 @@ async def test_callback_persists_discord_tokens(provider):
     assert stashed.expires_at is not None  # came from expires_in=3600
 
 
-async def test_callback_does_not_persist_when_guild_check_fails(tmp_db):
+async def test_callback_does_not_persist_when_guild_check_fails(tmp_auth_db):
     """If the user fails the guild check, we must NOT stash their Discord
     tokens — we shouldn't be holding credentials for users we just rejected."""
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config(guild_id="G1")
     p = DiscordOAuthProvider(
@@ -172,9 +170,8 @@ async def test_callback_does_not_persist_when_guild_check_fails(tmp_db):
     assert await store.load_discord_tokens("U1") is None
 
 
-async def test_user_not_in_guild_is_access_denied(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_user_not_in_guild_is_access_denied(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config(guild_id="G1")
     p = DiscordOAuthProvider(
@@ -246,10 +243,9 @@ async def test_revoke_access_kills_refresh(provider):
     assert await provider.load_refresh_token(client, first.refresh_token) is None
 
 
-async def test_guild_pagination(tmp_db):
+async def test_guild_pagination(tmp_auth_db):
     """User's target guild is on the second page; should still be admitted."""
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config(guild_id="TARGET")
 
@@ -319,15 +315,14 @@ async def test_refresh_slides_deadline_when_guild_check_passes(provider):
     assert rt2.expires_at > original_expiry
 
 
-async def test_refresh_revokes_grant_when_user_kicked_from_guild(tmp_db):
+async def test_refresh_revokes_grant_when_user_kicked_from_guild(tmp_auth_db):
     """A user who was kicked between issuance and refresh must be denied,
     every grant we ever issued them must be revoked (the guild requirement
     is server-wide), and the stashed Discord credentials must be deleted —
     we shouldn't keep a refresh token for an account we've just rejected."""
     from opr_mcp.auth.discord import DISCORD_API_GUILDS
 
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config(guild_id="G1")
 
@@ -388,14 +383,13 @@ async def test_refresh_revokes_grant_when_user_kicked_from_guild(tmp_db):
     assert await store.load_discord_tokens("U1") is None
 
 
-async def test_refresh_uses_discord_refresh_token_when_expiry_unknown(tmp_db):
+async def test_refresh_uses_discord_refresh_token_when_expiry_unknown(tmp_auth_db):
     """When the stash has ``expires_at=None`` (Discord omitted ``expires_in``)
     AND a refresh token is available, treat the stash as 'unknown freshness'
     and refresh proactively. Otherwise the access token will eventually
     expire silently and the MCP grant will stop sliding even though we
     kept a refresh token specifically to prevent that."""
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config(guild_id="G1")
 
@@ -458,13 +452,12 @@ async def test_refresh_preserves_deadline_when_stash_missing(provider):
     assert rt2.expires_at == original_expiry
 
 
-async def test_refresh_preserves_deadline_when_discord_refresh_fails(tmp_db):
+async def test_refresh_preserves_deadline_when_discord_refresh_fails(tmp_auth_db):
     """If the stashed access token is past expiry and Discord rejects our
     refresh token, treat it as 'unknown membership' — preserve the deadline
     so the user falls back to a browser auth at the natural expiry, but
     don't punish them for a Discord-side outage."""
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config(guild_id="G1")
 
@@ -513,11 +506,10 @@ async def test_refresh_preserves_deadline_when_discord_refresh_fails(tmp_db):
     assert rt2.expires_at == original_expiry
 
 
-async def test_refresh_uses_discord_refresh_token_when_access_expired(tmp_db):
+async def test_refresh_uses_discord_refresh_token_when_access_expired(tmp_auth_db):
     """When the stashed Discord access token is past expiry, we should refresh
     it via Discord's token endpoint and persist the new pair."""
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config(guild_id="G1")
 
@@ -570,11 +562,10 @@ async def test_refresh_uses_discord_refresh_token_when_access_expired(tmp_db):
     assert refreshed.refresh_token == "discord-refresh-2"
 
 
-async def test_refresh_preserves_resource_binding(tmp_db):
+async def test_refresh_preserves_resource_binding(tmp_auth_db):
     """If the original /authorize specified an RFC 8707 resource, the rotated
     access/refresh tokens must remain bound to it."""
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     cfg = _make_config()
     p = DiscordOAuthProvider(cfg, store, http_client_factory=_httpx_factory(_discord_handler_ok()))
@@ -605,11 +596,10 @@ async def test_refresh_preserves_resource_binding(tmp_db):
     assert issued2.resource == "https://opr.example.com/mcp"
 
 
-async def test_refresh_caps_access_token_at_grant_deadline(tmp_db):
+async def test_refresh_caps_access_token_at_grant_deadline(tmp_auth_db):
     """A refresh issued near the grant deadline must not produce an access token
     that outlives the grant. Otherwise the non-sliding bound is meaningless."""
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+    conn = db.open_auth_db(tmp_auth_db)
     store = AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     # 1h access TTL, 60s refresh TTL — refresh deadline arrives first.
     cfg = AuthConfig(

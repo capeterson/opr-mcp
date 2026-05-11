@@ -20,9 +20,8 @@ def _client(client_id: str = "c1") -> OAuthClientInformationFull:
     )
 
 
-async def test_client_round_trip(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_client_round_trip(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
 
     info = _client()
@@ -35,9 +34,8 @@ async def test_client_round_trip(tmp_db):
     assert await s.get_client("missing") is None
 
 
-async def test_pending_authorization_take_is_one_shot(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_pending_authorization_take_is_one_shot(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
 
     p = storage.PendingAuthorization(
@@ -59,9 +57,8 @@ async def test_pending_authorization_take_is_one_shot(tmp_db):
     assert second is None  # consumed
 
 
-async def test_pending_expired_returns_none(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_pending_expired_returns_none(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     p = storage.PendingAuthorization(
         id="pid",
@@ -78,9 +75,8 @@ async def test_pending_expired_returns_none(tmp_db):
     assert await s.take_pending("pid") is None
 
 
-async def test_access_token_lifecycle(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_access_token_lifecycle(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
 
     tok = storage.new_token()
@@ -99,9 +95,8 @@ async def test_access_token_lifecycle(tmp_db):
     assert await s.load_access_token(tok) is None
 
 
-async def test_access_token_expired(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_access_token_expired(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     tok = storage.new_token()
     await s.save_access_token(
@@ -113,9 +108,8 @@ async def test_access_token_expired(tmp_db):
     assert await s.load_access_token(tok) is None
 
 
-async def test_revoke_grant_kills_both_halves(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_revoke_grant_kills_both_halves(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     grant = storage.new_grant_id()
     access = storage.new_token()
@@ -137,9 +131,8 @@ async def test_revoke_grant_kills_both_halves(tmp_db):
     assert await s.load_refresh_token(refresh) is None
 
 
-async def test_client_secret_not_persisted_in_plaintext(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_client_secret_not_persisted_in_plaintext(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
 
     info = _client()
@@ -155,9 +148,8 @@ async def test_client_secret_not_persisted_in_plaintext(tmp_db):
     assert loaded is not None and loaded.client_secret == "super-secret-value"
 
 
-async def test_discord_tokens_round_trip(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_discord_tokens_round_trip(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
 
     await s.save_discord_tokens(
@@ -176,9 +168,8 @@ async def test_discord_tokens_round_trip(tmp_db):
     assert await s.load_discord_tokens("missing") is None
 
 
-async def test_discord_tokens_overwrite_on_reauth(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_discord_tokens_overwrite_on_reauth(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
 
     await s.save_discord_tokens(
@@ -197,9 +188,8 @@ async def test_discord_tokens_overwrite_on_reauth(tmp_db):
     assert loaded is not None and loaded.access_token == "a2" and loaded.refresh_token == "r2"
 
 
-async def test_discord_tokens_not_persisted_in_plaintext(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_discord_tokens_not_persisted_in_plaintext(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
 
     await s.save_discord_tokens(
@@ -219,9 +209,8 @@ async def test_discord_tokens_not_persisted_in_plaintext(tmp_db):
     assert b"plaintext-discord-refresh" not in row["refresh_token_enc"]
 
 
-async def test_discord_tokens_handles_missing_refresh(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_discord_tokens_handles_missing_refresh(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
 
     await s.save_discord_tokens(
@@ -234,9 +223,8 @@ async def test_discord_tokens_handles_missing_refresh(tmp_db):
     assert loaded is not None and loaded.refresh_token is None
 
 
-async def test_discord_tokens_delete(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_discord_tokens_delete(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
 
     await s.save_discord_tokens(
@@ -249,9 +237,8 @@ async def test_discord_tokens_delete(tmp_db):
     assert await s.load_discord_tokens("U1") is None
 
 
-async def test_purge_expired(tmp_db):
-    conn = db.open_db(tmp_db)
-    db.init_auth_schema(conn)
+async def test_purge_expired(tmp_auth_db):
+    conn = db.open_auth_db(tmp_auth_db)
     s = storage.AuthStorage(conn, fernet_key_secret="test-secret-12345678901234567890")
     fresh = storage.new_token()
     stale = storage.new_token()

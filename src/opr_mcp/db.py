@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
 import sqlite_vec
 
-from .config import EMBED_DIM, db_path
+from .config import EMBED_DIM, auth_db_path, db_path
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3
 
@@ -213,7 +216,7 @@ def _load_sqlite_vec(conn: sqlite3.Connection) -> None:
         conn.enable_load_extension(False)
 
 
-def connect(path: Path | None = None) -> sqlite3.Connection:
+def connect(path: Path | None = None, *, load_vec: bool = True) -> sqlite3.Connection:
     p = path or db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     # sqlite3.connect creates the file on first use, but its "unable to open
@@ -245,7 +248,8 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 30000")
-    _load_sqlite_vec(conn)
+    if load_vec:
+        _load_sqlite_vec(conn)
     return conn
 
 
@@ -314,3 +318,94 @@ def init_auth_schema(conn: sqlite3.Connection) -> None:
     """Idempotently create OAuth tables. Safe to call on existing DBs."""
     conn.executescript(AUTH_SCHEMA)
     conn.commit()
+
+
+_AUTH_TABLES = (
+    "oauth_clients",
+    "oauth_pending_authorizations",
+    "oauth_auth_codes",
+    "oauth_access_tokens",
+    "oauth_refresh_tokens",
+    "oauth_discord_tokens",
+)
+
+
+def connect_auth(path: Path | None = None) -> sqlite3.Connection:
+    """Open the auth DB. Does not load sqlite-vec (auth has no vector tables)."""
+    return connect(path or auth_db_path(), load_vec=False)
+
+
+def open_auth_db(path: Path | None = None) -> sqlite3.Connection:
+    """Open + schema-init the dedicated auth database.
+
+    Lives in its own file (see :func:`opr_mcp.config.auth_db_path`) so a
+    content-DB rebuild — wiping the parser output to pick up extraction
+    changes — doesn't take registered OAuth clients, issued tokens, or
+    encrypted Discord refresh tokens with it.
+
+    On first open, if the legacy content DB still carries OAuth tables from
+    before the split, their rows are copied across. The migration is gated
+    on the destination tables being empty so it never overwrites data that
+    auth.db has accumulated on its own.
+    """
+    conn = connect_auth(path)
+    init_auth_schema(conn)
+    _migrate_legacy_auth_if_needed(conn)
+    return conn
+
+
+def _migrate_legacy_auth_if_needed(auth_conn: sqlite3.Connection) -> None:
+    """Copy OAuth tables from the legacy content DB into auth.db, once."""
+    # If the auth DB already has any client rows, treat the split as complete:
+    # we must not stomp newer data with legacy rows from an abandoned opr.db.
+    existing = auth_conn.execute("SELECT COUNT(*) FROM oauth_clients").fetchone()[0]
+    if existing:
+        return
+
+    legacy_path = db_path()
+    if not legacy_path.exists() or legacy_path.is_dir():
+        return
+
+    # Open the legacy file read-only-ish (no schema init, no vec extension —
+    # we just want to scrape rows out). A fresh sqlite3.connect avoids
+    # interfering with whatever process owns the live content connection.
+    try:
+        legacy = sqlite3.connect(str(legacy_path), timeout=10.0)
+    except sqlite3.Error:
+        return
+    legacy.row_factory = sqlite3.Row
+    try:
+        has_legacy_auth = legacy.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='oauth_clients'"
+        ).fetchone()
+        if not has_legacy_auth:
+            return
+        total = 0
+        for table in _AUTH_TABLES:
+            present = legacy.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not present:
+                continue
+            rows = legacy.execute(f"SELECT * FROM {table}").fetchall()
+            if not rows:
+                continue
+            cols = rows[0].keys()
+            col_list = ",".join(cols)
+            placeholders = ",".join("?" * len(cols))
+            auth_conn.executemany(
+                f"INSERT OR REPLACE INTO {table}({col_list}) VALUES ({placeholders})",
+                [tuple(r[c] for c in cols) for r in rows],
+            )
+            total += len(rows)
+        if total:
+            auth_conn.commit()
+            log.info(
+                "auth: migrated %d row(s) from legacy content DB %s into %s",
+                total,
+                legacy_path,
+                auth_db_path() if auth_conn is not None else "(auth db)",
+            )
+    finally:
+        legacy.close()
