@@ -47,6 +47,29 @@ def _stub_embeddings(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _disable_forge_rate_limit():
+    """Strip the 3s/request gate during tests so suite stays fast.
+
+    Tests that mock at the ``api.list_books`` / ``api.resolve_pdf`` /
+    ``api.fetch_book_detail`` level bypass ``_http_json`` and never hit
+    the limiter, but tests that mock ``urlopen`` (e.g. test_forge_api)
+    do — and the default 3s would multiply suite runtime massively.
+    Restored after each test so the production default still applies in
+    non-test contexts.
+    """
+    from opr_mcp.forge import api as _api
+
+    prev = _api._RATE_LIMITER.min_interval
+    _api._RATE_LIMITER.set_min_interval(0.0)
+    _api._RATE_LIMITER.reset()
+    try:
+        yield
+    finally:
+        _api._RATE_LIMITER.set_min_interval(prev)
+        _api._RATE_LIMITER.reset()
+
+
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
     p = tmp_path / "opr.db"

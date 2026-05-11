@@ -55,7 +55,11 @@ def _make_pdf(path: Path) -> Path:
 
 
 @pytest.fixture
-def ingested_db(tmp_db, tmp_path):
+def ingested_db(tmp_db, tmp_path, monkeypatch):
+    # The PDF unit/upgrade parser is gated off by default — Forge JSON ingest
+    # owns those rows in production. Integration tests still want to verify
+    # the end-to-end PDF path works, so flip the flag on for them.
+    monkeypatch.setenv("FORGE_INGEST_PDF_UNITS", "true")
     pdf = _make_pdf(tmp_path / "core.pdf")
     conn = db.open_db(tmp_db)
     ingest_pdf(conn, pdf)

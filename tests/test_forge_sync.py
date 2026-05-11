@@ -7,7 +7,14 @@ from opr_mcp import db
 from opr_mcp.forge import api, sync
 
 
-def _book(uid: str, name: str, enabled: list[int], *, official: bool = True) -> dict:
+def _book(
+    uid: str,
+    name: str,
+    enabled: list[int],
+    *,
+    official: bool = True,
+    modified_at: str = "2026-01-01T00:00:00Z",
+) -> dict:
     return {
         "uid": uid,
         "name": name,
@@ -15,6 +22,7 @@ def _book(uid: str, name: str, enabled: list[int], *, official: bool = True) -> 
         "versionString": "1.0",
         "enabledGameSystems": enabled,
         "official": official,
+        "modifiedAt": modified_at,
     }
 
 
@@ -33,12 +41,24 @@ def _stub_download(*, written: dict[Path, bytes]):
     return _impl
 
 
+def _patch_detail(empty: bool = True):
+    """Default detail-mock: return an empty payload so ingest_forge_book
+    runs but writes zero units. Tests that care about unit data construct
+    their own payload and patch directly.
+    """
+    return patch.object(
+        api, "fetch_book_detail",
+        return_value={} if empty else None,
+    )
+
+
 def test_sync_emits_one_row_per_enabled_game_system(tmp_db, tmp_path):
     conn = db.open_db(tmp_db)
     book = _book("U1", "Beastmen", [4, 5, 6])
     written: dict[Path, bytes] = {}
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written=written)),
@@ -62,6 +82,7 @@ def test_sync_filters_to_requested_game_systems(tmp_db, tmp_path):
     book = _book("U1", "Beastmen", [4, 5, 6, 7])
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -82,6 +103,7 @@ def test_sync_detects_unchanged_render_id(tmp_db, tmp_path):
     written: dict[Path, bytes] = {}
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g, "RID1")),
         patch.object(sync, "_http_download", side_effect=_stub_download(written=written)),
@@ -96,12 +118,15 @@ def test_sync_detects_unchanged_render_id(tmp_db, tmp_path):
     assert len(written) == 1
 
 
-def test_sync_detects_changed_render_id(tmp_db, tmp_path):
-    """A new renderId for an existing (uid, gs) pair appends a new historical
-    row (the previous version is retained on disk and in the DB until the
-    retention sweeper trims it)."""
+def test_sync_detects_changed_modified_at(tmp_db, tmp_path):
+    """An advancing ``modifiedAt`` triggers a /pdf re-resolve and a new
+    download. The fresh renderId becomes a new ``forge_books`` row; the
+    previous one is retained on disk + in the DB until the retention
+    sweeper trims it.
+    """
     conn = db.open_db(tmp_db)
-    book = _book("U1", "B", [4])
+    book_v1 = _book("U1", "B", [4], modified_at="2026-01-01T00:00:00Z")
+    book_v2 = _book("U1", "B", [4], modified_at="2026-02-01T00:00:00Z")
     written: dict[Path, bytes] = {}
 
     rid = {"value": "RID1"}
@@ -109,13 +134,18 @@ def test_sync_detects_changed_render_id(tmp_db, tmp_path):
     def resolve(uid: str, gid: int):
         return _stub_resolve(uid, gid, rid["value"])
 
+    listing = {"value": [book_v1]}
+
     with (
-        patch.object(api, "list_books", return_value=[book]),
+        _patch_detail(),
+        patch.object(api, "list_books", side_effect=lambda f: listing["value"]),
         patch.object(api, "resolve_pdf", side_effect=resolve),
         patch.object(sync, "_http_download", side_effect=_stub_download(written=written)),
     ):
         sync.sync(conn, tmp_path, game_systems=[4])
+        # Upstream re-published with a new renderId AND new modifiedAt.
         rid["value"] = "RID2"
+        listing["value"] = [book_v2]
         stats = sync.sync(conn, tmp_path, game_systems=[4])
 
     rows = conn.execute(
@@ -127,11 +157,50 @@ def test_sync_detects_changed_render_id(tmp_db, tmp_path):
     assert len(written) == 2
 
 
+def test_sync_skips_pdf_when_modified_at_unchanged_and_local_file_exists(
+    tmp_db, tmp_path,
+):
+    """If ``modifiedAt`` matches what we recorded last scan and the local
+    PDF is still on disk, the second scan must NOT call /pdf at all —
+    the listing's modifiedAt is the only signal we need.
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("U1", "B", [4])
+    written: dict[Path, bytes] = {}
+    resolve_calls: list[tuple[str, int]] = []
+
+    def resolve(uid: str, gid: int):
+        resolve_calls.append((uid, gid))
+        return _stub_resolve(uid, gid, "RID1")
+
+    with (
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=resolve),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written=written)),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+    assert len(resolve_calls) == 1  # first scan resolves once
+
+    with (
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=resolve),
+        patch.object(sync, "_http_download", side_effect=AssertionError("must not download")),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert stats.unchanged == 1 and stats.new == 0 and stats.changed == 0
+    # Crucially, no second resolve_pdf call.
+    assert len(resolve_calls) == 1
+
+
 def test_sync_no_download_mode_skips_writes(tmp_db, tmp_path):
     conn = db.open_db(tmp_db)
     book = _book("U1", "B", [4])
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=AssertionError("download must not be called")),
@@ -154,6 +223,7 @@ def test_sync_records_failed_downloads(tmp_db, tmp_path):
         raise OSError("network down")
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=boom),
@@ -198,6 +268,7 @@ def test_sync_records_resolve_failures_in_stats(tmp_db, tmp_path):
         return _stub_resolve(uid, gid)
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book_ok, book_bad]),
         patch.object(api, "resolve_pdf", side_effect=resolve),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -223,6 +294,7 @@ def test_sync_survives_unexpected_resolve_exception(tmp_db, tmp_path):
         return _stub_resolve(uid, gid)
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book_ok, book_bad]),
         patch.object(api, "resolve_pdf", side_effect=resolve),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -240,6 +312,7 @@ def test_sync_prunes_rows_for_books_no_longer_returned(tmp_db, tmp_path):
     book_b = _book("B", "Bravo", [4])
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book_a, book_b]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -251,6 +324,7 @@ def test_sync_prunes_rows_for_books_no_longer_returned(tmp_db, tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM forge_books").fetchone()[0] == 2
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book_a]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -271,6 +345,7 @@ def test_prune_also_drops_ingested_document_rows(tmp_db, tmp_path):
     book = _book("DEAD", "Dead", [4])
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -303,6 +378,7 @@ def test_prune_also_drops_ingested_document_rows(tmp_db, tmp_path):
     # Second scan: book is gone. Pruning should clear forge_books, the on-disk
     # PDF, the documents row, and the chunks_vec entry.
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[_book("OTHER", "Other", [4])]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -325,6 +401,7 @@ def test_prune_skipped_for_filter_with_empty_response(tmp_db, tmp_path):
 
     # First scan: both filters populated.
     with (
+        _patch_detail(),
         patch.object(api, "list_books", side_effect=lambda f: [official] if f == "official" else [community]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -335,6 +412,7 @@ def test_prune_skipped_for_filter_with_empty_response(tmp_db, tmp_path):
     # Second scan: official still has the book, community returns empty (transient).
     # Pruning must skip the community scope entirely; the community row survives.
     with (
+        _patch_detail(),
         patch.object(api, "list_books", side_effect=lambda f: [official] if f == "official" else []),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -354,6 +432,7 @@ def test_local_path_stored_as_absolute(tmp_db, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -364,22 +443,26 @@ def test_local_path_stored_as_absolute(tmp_db, tmp_path, monkeypatch):
     assert Path(row["local_path"]).is_absolute()
 
 
-def test_no_download_does_not_advance_render_id(tmp_db, tmp_path):
-    """Dry-run must not record the new render_id, or the next normal scan
-    would think the book is already up-to-date and skip the actual download.
+def test_no_download_does_not_advance_modified_at(tmp_db, tmp_path):
+    """Dry-run must not record the new render_id or the new modifiedAt, or
+    the next normal scan would think the book is already up-to-date and
+    skip the actual download.
     """
     conn = db.open_db(tmp_db)
-    book = _book("U", "U", [4])
+    book_v1 = _book("U", "U", [4], modified_at="2026-01-01T00:00:00Z")
+    book_v2 = _book("U", "U", [4], modified_at="2026-02-01T00:00:00Z")
 
     with (
-        patch.object(api, "list_books", return_value=[book]),
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book_v1]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g, "RID1")),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
     ):
         sync.sync(conn, tmp_path, game_systems=[4])
 
     with (
-        patch.object(api, "list_books", return_value=[book]),
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book_v2]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g, "RID2")),
         patch.object(sync, "_http_download", side_effect=AssertionError("must not be called")),
     ):
@@ -393,10 +476,12 @@ def test_no_download_does_not_advance_render_id(tmp_db, tmp_path):
     # Dry-run must not have inserted a row for RID2.
     assert rids == {"RID1"}
 
-    # Subsequent normal scan with RID2 must actually download and append a new row.
+    # Subsequent normal scan with the v2 modifiedAt must actually download
+    # and append a new row.
     written: dict[Path, bytes] = {}
     with (
-        patch.object(api, "list_books", return_value=[book]),
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[book_v2]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g, "RID2")),
         patch.object(sync, "_http_download", side_effect=_stub_download(written=written)),
     ):
@@ -420,6 +505,7 @@ def test_prune_keeps_rows_when_unlink_fails(tmp_db, tmp_path, monkeypatch):
     book_b = _book("B", "B", [4])
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book_a, book_b]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -439,6 +525,7 @@ def test_prune_keeps_rows_when_unlink_fails(tmp_db, tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "unlink", selective_boom)
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book_a]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -458,6 +545,7 @@ def test_no_download_disables_pruning(tmp_db, tmp_path):
 
     # Seed the DB + filesystem with a book.
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -469,6 +557,7 @@ def test_no_download_disables_pruning(tmp_db, tmp_path):
     # Dry-run scan where the book has disappeared. With prune=False, files
     # and rows must remain.
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=AssertionError("must not be called")),
@@ -486,6 +575,7 @@ def test_sync_skips_pruning_when_listing_returns_empty(tmp_db, tmp_path):
     book = _book("A", "Alpha", [4])
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[book]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -493,6 +583,7 @@ def test_sync_skips_pruning_when_listing_returns_empty(tmp_db, tmp_path):
         sync.sync(conn, tmp_path, game_systems=[4])
 
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[]),
         patch.object(api, "resolve_pdf", side_effect=AssertionError("must not be called")),
     ):
@@ -510,6 +601,7 @@ def test_sync_pruning_is_filter_scoped(tmp_db, tmp_path):
 
     # First scan: pull both filters, so both books land.
     with (
+        _patch_detail(),
         patch.object(api, "list_books", side_effect=lambda f: [official] if f == "official" else [community]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -520,6 +612,7 @@ def test_sync_pruning_is_filter_scoped(tmp_db, tmp_path):
     # Second scan: only community filter, and it returns nothing. Official
     # row must survive — it's not in scope for this scan.
     with (
+        _patch_detail(),
         patch.object(api, "list_books", return_value=[community]),
         patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
         patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
@@ -528,3 +621,243 @@ def test_sync_pruning_is_filter_scoped(tmp_db, tmp_path):
 
     rows = {(r["uid"], r["official"]) for r in conn.execute("SELECT uid, official FROM forge_books")}
     assert rows == {("O", 1), ("C", 0)}
+
+
+# --- Structured-detail ingest path (Forge JSON → units / unit_upgrades) ---
+
+
+def _detail_payload(*, uid: str = "U1") -> dict:
+    """Minimal Army Forge book detail payload — one unit, one upgrade
+    package with one section and one option.
+
+    Mirrors the live shape from ``GET /api/army-books/{uid}?gameSystem=N``;
+    just the fields the ingest cares about.
+    """
+    return {
+        "uid": uid,
+        "name": "Beastmen",
+        "versionString": "1.2.3",
+        "modifiedAt": "2026-01-01T00:00:00Z",
+        "units": [
+            {
+                "id": "unit-A",
+                "name": "Cult Leader",
+                "size": 1,
+                "cost": 85,
+                "quality": 3,
+                "defense": 4,
+                "weapons": [
+                    {
+                        "name": "Sharp Claws",
+                        "label": "Sharp Claws (A4, Disintegrate)",
+                        "range": None, "attacks": 4, "count": 1,
+                        "specialRules": [
+                            {"name": "Disintegrate", "label": "Disintegrate"},
+                        ],
+                    },
+                ],
+                "rules": [
+                    {"name": "Hero", "label": "Hero"},
+                    {"name": "Tough", "label": "Tough(3)", "rating": 3},
+                ],
+                "upgrades": ["P1"],
+            },
+        ],
+        "upgradePackages": [
+            {
+                "uid": "P1",
+                "sections": [
+                    {
+                        "uid": "S1",
+                        "label": "Replace Sharp Claws",
+                        "variant": "replace",
+                        "options": [
+                            {
+                                "uid": "O1",
+                                "label": "Plasma Pistol (12\", A1, AP(2))",
+                                "cost": 5,
+                                "costs": [],
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def test_sync_writes_units_from_detail_payload(tmp_db, tmp_path):
+    """End-to-end: a fresh sync calls fetch_book_detail and the response
+    lands as ``units`` + ``unit_upgrades`` rows under a synthetic
+    forge-api document.
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("U1", "Beastmen", [4])
+
+    with (
+        patch.object(api, "fetch_book_detail", return_value=_detail_payload()),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert stats.details_synced == 1
+    doc = conn.execute(
+        "SELECT id, path, army, version FROM documents WHERE path = ?",
+        ("forge-api://U1~4",),
+    ).fetchone()
+    assert doc is not None
+    assert doc["army"] == "Beastmen"
+    # Version comes from the listing entry (book_meta), not the detail payload —
+    # both should match in production, but the listing is canonical.
+    assert doc["version"] == "1.0"
+    unit = conn.execute(
+        "SELECT name, quality, defense, base_points, source FROM units "
+        "WHERE document_id = ?",
+        (doc["id"],),
+    ).fetchone()
+    assert unit["name"] == "Cult Leader"
+    assert unit["quality"] == "3+"
+    assert unit["defense"] == "4+"
+    assert unit["base_points"] == 85
+    assert unit["source"] == "forge-api"
+    upgrade = conn.execute(
+        "SELECT group_kind, option_text, points_cost, source "
+        "FROM unit_upgrades WHERE document_id = ?",
+        (doc["id"],),
+    ).fetchone()
+    assert upgrade["group_kind"] == "Replace Sharp Claws"
+    assert upgrade["points_cost"] == 5
+    assert upgrade["source"] == "forge-api"
+
+
+def test_sync_skips_detail_fetch_when_modified_at_unchanged(tmp_db, tmp_path):
+    """Second scan with the same modifiedAt must NOT call
+    fetch_book_detail — that's the whole point of the detail-modified-at
+    bookkeeping.
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("U1", "Beastmen", [4])
+    detail_calls: list[tuple[str, int]] = []
+
+    def detail(uid: str, gid: int):
+        detail_calls.append((uid, gid))
+        return _detail_payload()
+
+    with (
+        patch.object(api, "fetch_book_detail", side_effect=detail),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+    assert len(detail_calls) == 1
+
+    with (
+        patch.object(api, "fetch_book_detail", side_effect=detail),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert stats.details_synced == 0
+    assert len(detail_calls) == 1
+
+
+def test_sync_refetches_detail_when_modified_at_advances(tmp_db, tmp_path):
+    """Bumping modifiedAt re-triggers the detail fetch."""
+    conn = db.open_db(tmp_db)
+    book_v1 = _book("U1", "Beastmen", [4], modified_at="2026-01-01T00:00:00Z")
+    book_v2 = _book("U1", "Beastmen", [4], modified_at="2026-02-01T00:00:00Z")
+    detail_calls: list[tuple[str, int]] = []
+
+    def detail(uid: str, gid: int):
+        detail_calls.append((uid, gid))
+        return _detail_payload()
+
+    with (
+        patch.object(api, "fetch_book_detail", side_effect=detail),
+        patch.object(api, "list_books", return_value=[book_v1]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    with (
+        patch.object(api, "fetch_book_detail", side_effect=detail),
+        patch.object(api, "list_books", return_value=[book_v2]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g, "RID2")),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert stats.details_synced == 1
+    assert len(detail_calls) == 2
+
+
+def test_sync_records_detail_failure_without_aborting_pdf(tmp_db, tmp_path):
+    """A 5xx on the detail endpoint must not block the PDF mirror — the
+    failure is recorded, but PDF state still advances.
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("U1", "Beastmen", [4])
+
+    def boom(uid: str, gid: int):
+        raise api.ArmyForgeError("api 503")
+
+    with (
+        patch.object(api, "fetch_book_detail", side_effect=boom),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        stats = sync.sync(conn, tmp_path, game_systems=[4])
+
+    assert stats.new == 1
+    assert stats.details_synced == 0
+    assert any("api 503" in err for _, err in stats.failed)
+
+
+def test_sync_pruning_drops_synthetic_api_document(tmp_db, tmp_path):
+    """When a book is no longer in the listing, prune drops both the
+    PDF-side document AND the synthetic forge-api:// document (so its
+    units/unit_upgrades cascade away too).
+    """
+    conn = db.open_db(tmp_db)
+    book = _book("DEAD", "Dead", [4])
+
+    with (
+        patch.object(api, "fetch_book_detail", return_value=_detail_payload(uid="DEAD")),
+        patch.object(api, "list_books", return_value=[book]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4])
+
+    syn_doc = conn.execute(
+        "SELECT id FROM documents WHERE path = ?", ("forge-api://DEAD~4",),
+    ).fetchone()
+    assert syn_doc is not None
+    units_before = conn.execute(
+        "SELECT COUNT(*) FROM units WHERE document_id = ?", (syn_doc["id"],),
+    ).fetchone()[0]
+    assert units_before > 0
+
+    other = _book("OTHER", "Other", [4])
+    with (
+        _patch_detail(),
+        patch.object(api, "list_books", return_value=[other]),
+        patch.object(api, "resolve_pdf", side_effect=lambda u, g: _stub_resolve(u, g)),
+        patch.object(sync, "_http_download", side_effect=_stub_download(written={})),
+    ):
+        sync.sync(conn, tmp_path, game_systems=[4], filters=["official"])
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM documents WHERE path = ?",
+        ("forge-api://DEAD~4",),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM units WHERE document_id = ?", (syn_doc["id"],),
+    ).fetchone()[0] == 0
