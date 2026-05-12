@@ -7,10 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import embeddings
-from ..config import pdf_parse_unit_blocks
 from .chunk import Chunk, chunk_blocks
-from .parse_units import equipment_json, parse_special_rules, parse_unit, rules_json
-from .parse_upgrades import parse_upgrades
+from .parse_units import parse_special_rules
 from .pdf import detect_metadata, iter_blocks, page_count, sha256_file
 from .segment import Section, segment
 
@@ -22,10 +20,7 @@ class IngestStats:
     documents: int = 0
     skipped: int = 0
     chunks: int = 0
-    units: int = 0
-    units_skipped: int = 0
     rules: int = 0
-    upgrades: int = 0
 
 
 def _sections_to_chunks(
@@ -107,16 +102,7 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
 
     meta = detect_metadata(path)
     pages = page_count(path)
-
-    # Prefer the Forge-recorded version when this PDF is a Forge mirror; the
-    # banner regex strips the leading "V" but Forge's versionString may carry
-    # extra precision (or fix typos in older books).
-    forge_meta = conn.execute(
-        "SELECT version FROM forge_books WHERE local_path = ? "
-        "ORDER BY last_changed DESC LIMIT 1",
-        (str(path),),
-    ).fetchone()
-    version = (forge_meta["version"] if forge_meta else None) or meta.get("version")
+    version = meta.get("version")
 
     # --- parse phase: PDF parsing, segmentation, embedding inference, and
     # unit/rule parsing all happen WITHOUT holding the SQLite write lock.
@@ -132,37 +118,17 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
         vecs = embeddings.encode([c.text for c in chunks])
         chunk_blobs = [embeddings.to_blob(v) for v in vecs]
 
-    # Unit/upgrade extraction from PDFs is off by default — the Forge JSON
-    # ingest path owns those rows, and parsing them from the PDF is the
-    # fragile part the JSON path replaces. Set PDF_PARSE_UNIT_BLOCKS=true to
-    # turn the PDF unit/upgrade parser back on (useful as a fallback for any
-    # book that isn't on Forge). Special-rule prose is always extracted —
-    # search_rules and the include_rule_text enrichment depend on it.
-    parse_unit_blocks = pdf_parse_unit_blocks()
-    parsed_units: list[tuple[int, object, list]] = []
+    # Unit/upgrade rows come from the Forge JSON ingest path; the PDF
+    # parser only contributes chunks and special-rule prose for
+    # search_rules and the include_rule_text enrichment.
     parsed_rules: list[tuple[int, list]] = []
-    units_skipped = 0
     for sec_i, sec in enumerate(sections):
+        if sec.section_type != "special_rule":
+            continue
         try:
-            if sec.section_type == "unit" and parse_unit_blocks:
-                u = parse_unit(sec)
-                if u is None:
-                    units_skipped += 1
-                    continue
-                try:
-                    groups = parse_upgrades(sec)
-                except Exception as exc:
-                    log.warning(
-                        "Upgrade parse failed for %s in %s: %s",
-                        u.name, path.name, exc,
-                    )
-                    groups = []
-                parsed_units.append((sec_i, u, groups))
-            elif sec.section_type == "special_rule":
-                parsed_rules.append((sec_i, list(parse_special_rules(sec))))
+            parsed_rules.append((sec_i, list(parse_special_rules(sec))))
         except Exception as exc:
             log.warning("Parse failure in %s section %r: %s", path.name, sec.title, exc)
-            units_skipped += 1
 
     # --- write phase: all DB mutations in a single tight transaction so the
     # write lock is held only for the time it takes to run the INSERTs.
@@ -260,54 +226,6 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
             idx = first_chunk_idx_per_section.get(sec_i)
             return chunk_ids[idx] if idx is not None else None
 
-        units_added = 0
-        upgrades_added = 0
-        for sec_i, u, groups in parsed_units:
-            cur = conn.execute(
-                """
-                INSERT INTO units (document_id, chunk_id, army, name, qty, quality, defense,
-                                   base_points, equipment_json, rules_json, raw_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    doc_id,
-                    _anchor(sec_i),
-                    meta["army"] or "Unknown",
-                    u.name,
-                    u.qty,
-                    u.quality,
-                    u.defense,
-                    u.base_points,
-                    equipment_json(u.equipment),
-                    rules_json(u.rules),
-                    u.raw_text,
-                ),
-            )
-            units_added += 1
-            unit_id = cur.lastrowid
-
-            for gi, group in enumerate(groups):
-                for oi, opt in enumerate(group.options):
-                    conn.execute(
-                        """
-                        INSERT INTO unit_upgrades (
-                            document_id, unit_id, group_index, group_kind,
-                            option_index, option_text, points_cost, raw_text
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            doc_id,
-                            unit_id,
-                            gi,
-                            group.kind,
-                            oi,
-                            opt.text,
-                            opt.points_cost,
-                            u.raw_text,
-                        ),
-                    )
-                    upgrades_added += 1
-
         rules_added = 0
         rule_scope = "core" if meta["army"] is None else f"army:{meta['army']}"
         for sec_i, rules in parsed_rules:
@@ -336,18 +254,12 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
 
     stats.documents += 1
     stats.chunks += len(chunks)
-    stats.units += units_added
-    stats.units_skipped += units_skipped
     stats.rules += rules_added
-    stats.upgrades += upgrades_added
     log.info(
-        "Ingested %s: %d chunks, %d units (+%d skipped), %d rules, %d upgrade options",
+        "Ingested %s: %d chunks, %d rules",
         path.name,
         len(chunks),
-        units_added,
-        units_skipped,
         rules_added,
-        upgrades_added,
     )
     return stats
 

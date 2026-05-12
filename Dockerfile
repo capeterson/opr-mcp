@@ -53,9 +53,8 @@ COPY --from=build /app/.venv /app/.venv
 
 # Mount points:
 #   /pdf           — user's PDF corpus (e.g. advanced rules / lore PDFs you
-#                    drop in). FORGE_SYNC is on by default and runs JSON-only;
-#                    set FORGE_DOWNLOAD_PDFS=1 to additionally mirror army-book
-#                    PDFs into /pdf/forge/ for full-text indexing.
+#                    drop in). FORGE_SYNC is on by default and syncs JSON
+#                    detail for army-roster data.
 #   /data/db       — SQLite index. Must be writable.
 #   /data/hf-cache — HuggingFace model cache.
 RUN mkdir -p /pdf /data/db /data/hf-cache

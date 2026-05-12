@@ -49,12 +49,11 @@ class _PdfHandler(FileSystemEventHandler):
                 try:
                     stats = ingest_path(conn, self._pdf_dir)
                     log.info(
-                        "Watch reingest of %s: %d new (+%d skipped), %d chunks, %d units, %d rules",
+                        "Watch reingest of %s: %d new (+%d skipped), %d chunks, %d rules",
                         self._pdf_dir,
                         stats.documents,
                         stats.skipped,
                         stats.chunks,
-                        stats.units,
                         stats.rules,
                     )
                 finally:
@@ -89,12 +88,11 @@ def initial_ingest(pdf_dir: Path) -> IngestStats:
         try:
             stats = ingest_path(conn, pdf_dir)
             log.info(
-                "Startup ingest of %s: %d new (+%d skipped), %d chunks, %d units, %d rules",
+                "Startup ingest of %s: %d new (+%d skipped), %d chunks, %d rules",
                 pdf_dir,
                 stats.documents,
                 stats.skipped,
                 stats.chunks,
-                stats.units,
                 stats.rules,
             )
             return stats

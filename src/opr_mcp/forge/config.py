@@ -2,11 +2,8 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
-from platformdirs import user_data_dir
-
-from ..config import APP_NAME, _bool_env
+from ..config import _bool_env
 from .api import GAME_SYSTEMS, SLUG_TO_ID
 
 DEFAULT_INTERVAL_SECONDS = 12 * 60 * 60  # 12 hours
@@ -112,21 +109,6 @@ def games() -> list[int] | None:
     return out or _default_games()
 
 
-def pdf_dir(serve_pdf_dir: Path | None = None) -> Path:
-    """Where to download PDFs.
-
-    Precedence: ``FORGE_PDF_DIR`` > ``<serve_pdf_dir>/forge`` > app data dir.
-    Putting Forge downloads under a subdir of the user's existing PDF dir lets
-    ``serve --watch`` pick them up automatically (the watcher is recursive).
-    """
-    env = os.environ.get("FORGE_PDF_DIR")
-    if env:
-        return Path(env).expanduser()
-    if serve_pdf_dir is not None:
-        return serve_pdf_dir / "forge"
-    return Path(user_data_dir(APP_NAME, appauthor=False)) / "forge-pdfs"
-
-
 def enabled_for_serve() -> bool:
     """Read ``FORGE_SYNC`` — flag for the background Forge scheduler.
 
@@ -136,14 +118,3 @@ def enabled_for_serve() -> bool:
     (or ``0``/``no``/``off``) to disable.
     """
     return _bool_env("FORGE_SYNC", True)
-
-
-def download_pdfs_enabled() -> bool:
-    """Read ``FORGE_DOWNLOAD_PDFS`` — opt-in to mirroring Forge PDFs locally.
-
-    Defaults to **off**: the scheduler / ``forge-scan`` only sync the
-    structured JSON detail by default. Set ``FORGE_DOWNLOAD_PDFS=true``
-    to additionally download every army-book PDF and drop it into the
-    watched directory for full-text indexing.
-    """
-    return _bool_env("FORGE_DOWNLOAD_PDFS", False)

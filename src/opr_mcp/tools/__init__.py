@@ -48,8 +48,7 @@ def filtered_document_ids(
     matches the top-of-bucket — callers JOIN to whichever table they
     care about and naturally land on the doc that actually carries the
     data. Returning only one would let the more-recently-ingested PDF
-    doc (with no units when ``PDF_PARSE_UNIT_BLOCKS`` is off) shadow
-    the forge-api doc.
+    doc (which never carries unit rows) shadow the forge-api doc.
 
     ``game_system`` / ``army`` are optional further restrictors. An empty
     list means "filter matched zero docs" — caller should short-circuit.

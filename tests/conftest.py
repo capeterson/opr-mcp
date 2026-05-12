@@ -51,8 +51,8 @@ def _stub_embeddings(monkeypatch):
 def _disable_forge_rate_limit():
     """Strip the 3s/request gate during tests so suite stays fast.
 
-    Tests that mock at the ``api.list_books`` / ``api.resolve_pdf`` /
-    ``api.fetch_book_detail`` level bypass ``_http_json`` and never hit
+    Tests that mock at the ``api.list_books`` / ``api.fetch_book_detail``
+    level bypass ``_http_json`` and never hit
     the limiter, but tests that mock ``urlopen`` (e.g. test_forge_api)
     do — and the default 3s would multiply suite runtime massively.
     Restored after each test so the production default still applies in

@@ -45,11 +45,6 @@ That's it. The server:
   changes (drop in your advanced-rules / lore PDF — that's the recommended
   use of this directory now that roster data comes from Forge JSON).
 
-PDFs from Forge are **not** downloaded by default; the JSON detail alone
-covers unit / upgrade lookups. Set `FORGE_DOWNLOAD_PDFS=true` (or pass
-`--forge-download-pdfs`) to additionally mirror army-book PDFs for full-text
-search.
-
 Add to your Claude Desktop / Claude Code MCP config:
 
 ```json
@@ -73,29 +68,19 @@ at startup and a background re-scan every `FORGE_INTERVAL_SECONDS` (12h
 by default), keeping `units` and `unit_upgrades` in sync with whatever
 OPR has published.
 
-`FORGE_DOWNLOAD_PDFS=true` (off by default) additionally mirrors every
-army-book PDF into `<PDF_DIR>/forge/` so the watcher can index the full
-text — useful for `search_rules` over army-book prose that isn't captured
-in the structured JSON. The PDFs are large; only opt in if you need it.
-
 A one-shot scan is also available via the CLI:
 
 ```bash
-# JSON only:
 uv run opr-mcp forge-scan
-
-# JSON + PDF mirror:
-uv run opr-mcp forge-scan --download-pdfs
 ```
 
 How change detection works: every listing entry carries a `modifiedAt`
 timestamp. A scan compares it to the per-pair value the local DB recorded
 on the previous scan — only pairs whose `modifiedAt` advanced trigger a
-fresh JSON detail fetch. PDF mirroring (when enabled) adds a parallel
-check on the PDF's rotating `renderId` nanoid.
+fresh JSON detail fetch.
 
 See the [Configuration](#configuration) section for all `FORGE_*` env
-vars (interval, filters, scope, destination directory, rate limit).
+vars (interval, filters, scope, rate limit).
 
 ## PDF ingest
 
@@ -106,10 +91,8 @@ watched for changes while the server runs; SHA-256 dedup makes re-ingesting
 unchanged files a no-op. The directory is created if it does not exist.
 
 Roster data (unit stats, weapons, upgrade groups) does **not** require any
-PDFs in `PDF_DIR` — it comes from the Forge JSON sync. PDF unit-block
-parsing exists as a fallback (toggle via `PDF_PARSE_UNIT_BLOCKS=true`)
-for books that aren't on Forge; the JSON path is more reliable when
-available.
+PDFs in `PDF_DIR` — it comes from the Forge JSON sync. PDFs only
+contribute full-text search content and special-rule prose.
 
 ```bash
 # Manual ingest of a file or directory:
@@ -204,15 +187,14 @@ Only relevant when running with `--transport http` or `AUTH_ENABLED=true`.
 
 | Name | Default | Purpose |
 |---|---|---|
-| `SERVER_HOST` | `127.0.0.1` | HTTP bind host. Overridable per-invocation with `--host`. |
-| `SERVER_PORT` | `8765` | HTTP bind port. Overridable per-invocation with `--port`. |
+| `HOST` | `127.0.0.1` | HTTP bind host. Overridable per-invocation with `--host`. |
+| `PORT` | `8765` | HTTP bind port. Overridable per-invocation with `--port`. |
 
 ### PDF ingest
 
 | Name | Default | Purpose |
 |---|---|---|
-| `PDF_DIR` | `/pdf` | Directory of user-supplied PDFs (typically the advanced-rules PDF). Ingested at startup, watched for changes, created if missing. Forge PDF mirror lands at `<PDF_DIR>/forge/` when `FORGE_DOWNLOAD_PDFS=true`. |
-| `PDF_PARSE_UNIT_BLOCKS` | `false` | Have the PDF parser also write to `units` / `unit_upgrades`. Off by default — Forge JSON is the canonical source. Turn on as a fallback for books not on Forge. |
+| `PDF_DIR` | `/pdf` | Directory of user-supplied PDFs (typically the advanced-rules PDF). Ingested at startup, watched for changes, created if missing. |
 
 ### Embeddings
 
@@ -226,12 +208,10 @@ Only relevant when running with `--transport http` or `AUTH_ENABLED=true`.
 | Name | Default | Purpose |
 |---|---|---|
 | `FORGE_SYNC` | `true` | Run the JSON detail sync (immediate one-shot at startup + background loop). Set to `false` / `0` / `no` / `off` to disable. |
-| `FORGE_DOWNLOAD_PDFS` | `false` | Additionally download every army-book PDF into `<PDF_DIR>/forge/` for full-text indexing. JSON detail is always synced; this is the opt-in mirror leg. |
 | `FORGE_INTERVAL_SECONDS` | `43200` (12h) | Background scheduler interval. Minimum 60. |
 | `FORGE_FILTERS` | `official` | Comma-separated: `official`, `community`, or both. The community catalog is large (thousands of books); enable deliberately. |
 | `FORGE_GAMES` | `gf,aof` | Comma-separated game-system slugs or numeric IDs. Use `all` to opt in to every known system (`ftl,gf,gff,aof,aofs,aofr,aofq,aofqai,gfsq,gfsqai`). The cleanup sweeper also honors this — content for systems out of scope is pruned. |
-| `FORGE_PDF_DIR` | `<PDF_DIR>/forge` if `PDF_DIR` set, else `forge-pdfs` under user data dir | Explicit destination for downloaded PDFs (only used when `FORGE_DOWNLOAD_PDFS=true`). |
-| `FORGE_MIN_REQUEST_INTERVAL_SECONDS` | `3.0` | Minimum spacing between outbound Forge / CDN requests. The shared rate limiter applies to listing, `/pdf` resolve, detail fetch, and CDN download. |
+| `FORGE_MIN_REQUEST_INTERVAL_SECONDS` | `3.0` | Minimum spacing between outbound Forge requests. The shared rate limiter applies to listing and detail fetch. |
 
 ### Retention
 
@@ -270,9 +250,7 @@ docker run --rm -i \
 The container mounts:
 
 - `/pdf` — your user-supplied PDF corpus (e.g. the advanced-rules PDF). Ingested
-  on startup and re-ingested automatically on file changes. Forge PDF mirror
-  (when `FORGE_DOWNLOAD_PDFS=1`) lands in `/pdf/forge/`, so the volume must be
-  writable in that case.
+  on startup and re-ingested automatically on file changes.
 - `/data/db` — SQLite index. Persist this volume to avoid re-ingesting and
   re-syncing Forge JSON on every container restart.
 - `/data/hf-cache` — HuggingFace cache for the embedding model. Persist to
@@ -282,18 +260,6 @@ The default `CMD` is `serve`, which ingests `/pdf` on startup, watches it
 for changes, and runs the Forge JSON sync (immediate one-shot + 12h loop).
 To use it with Claude Desktop / Claude Code, point your MCP config at
 `docker run … ghcr.io/capeterson/opr-mcp:dev`.
-
-To additionally mirror army-book PDFs for full-text indexing, set
-`-e FORGE_DOWNLOAD_PDFS=1`:
-
-```bash
-docker run --rm -i \
-  -v /path/to/your/opr-pdfs:/pdf \
-  -v opr-mcp-db:/data/db \
-  -v opr-mcp-hf:/data/hf-cache \
-  -e FORGE_DOWNLOAD_PDFS=1 \
-  ghcr.io/capeterson/opr-mcp:dev
-```
 
 ## Remote deployment with Discord OAuth
 
@@ -372,16 +338,8 @@ Tests stub out the real embedding model so they run offline.
 ## Known limitations
 
 - **Image-only stat blocks** (some army books render unit cards as flattened images)
-  won't yield structured `units` rows when relying on PDF parsing. The Forge JSON
-  path bypasses this entirely and is the default. OCR is out of scope for v1.
-- **Heuristic PDF parser.** With `PDF_PARSE_UNIT_BLOCKS=true` enabled as a
-  fallback, some unit cards in some books fall back to chunk-only storage. Search
-  still finds them; structured `lookup_unit` may miss them. Parse failures are
-  logged with PDF + page numbers.
-- **Upgrade tables (PDF path).** When falling back to PDF parsing, structured
-  upgrade extraction is best-effort line-based parsing of the PyMuPDF text dump.
-  Books with non-standard upgrade-section formatting may yield partial results.
-  The Forge JSON path doesn't have this limitation.
+  are not parsed; the Forge JSON path is the sole source of structured unit data.
+  OCR is out of scope for v1.
 - **No reranker.** RRF over BM25 + vector is good enough at this corpus size.
 
 ## Out of scope
