@@ -29,26 +29,6 @@ def _patch_urlopen(responses: list[object]):
     return patch.object(api, "urlopen", side_effect=lambda *a, **kw: _FakeResp(next(it)))
 
 
-def test_render_id_from_path_strips_dirs_and_suffix():
-    assert (
-        api.render_id_from_path("army-books/pdfs/abc~4/zzzz1234.pdf") == "zzzz1234"
-    )
-
-
-def test_resolve_pdf_returns_url_and_path():
-    payload = {"pdfPath": "army-books/pdfs/U~4/RID.pdf", "pdfFileName": "AOF.pdf"}
-    with _patch_urlopen([payload]):
-        url, name, path = api.resolve_pdf("U", 4)
-    assert url == "https://army-forge.opr-cdn.com/army-books/pdfs/U~4/RID.pdf"
-    assert name == "AOF.pdf"
-    assert path == "army-books/pdfs/U~4/RID.pdf"
-
-
-def test_resolve_pdf_raises_on_missing_path():
-    with _patch_urlopen([{"pdfFileName": "x.pdf"}]), pytest.raises(api.ArmyForgeError):
-        api.resolve_pdf("U", 4)
-
-
 def test_list_books_dedupes_official_duplicate_pages():
     """Official catalog returns the same set on every page; dedupe must stop us."""
     book = {"uid": "A", "name": "A", "enabledGameSystems": [4]}

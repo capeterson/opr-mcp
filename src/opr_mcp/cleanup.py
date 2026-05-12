@@ -47,7 +47,6 @@ def _version_key(version: str | None) -> tuple[int, ...]:
 class SweepStats:
     pruned_out_of_scope: int = 0
     pruned_old_versions: int = 0
-    skipped_locked: int = 0
     failures: list[str] = field(default_factory=list)
 
     @property
@@ -70,7 +69,7 @@ def sweep(
     """
     stats = SweepStats()
     rows = conn.execute(
-        "SELECT uid, game_system, render_id, version, local_path, last_changed "
+        "SELECT uid, game_system, render_id, version, last_changed "
         "FROM forge_books"
     ).fetchall()
 
@@ -108,12 +107,11 @@ def sweep(
     dropped_pairs: set[tuple[str, int]] = set()
     for r, reason in to_drop:
         try:
-            ok = forge_sync._drop_forge_version(
+            forge_sync._drop_forge_version(
                 conn,
                 uid=r["uid"],
                 game_system=r["game_system"],
                 render_id=r["render_id"],
-                local_path=r["local_path"],
             )
         except Exception as exc:  # noqa: BLE001 — sweeper must never bring down the server
             log.exception("cleanup: failed to drop %s/%d/%s",
@@ -121,9 +119,6 @@ def sweep(
             stats.failures.append(
                 f"{r['uid']}/{r['game_system']}/{r['render_id']}: {exc}"
             )
-            continue
-        if not ok:
-            stats.skipped_locked += 1
             continue
         if reason == "scope":
             stats.pruned_out_of_scope += 1
@@ -149,11 +144,10 @@ def sweep(
         conn.commit()
 
     log.info(
-        "cleanup: pruned %d (out-of-scope=%d, old-versions=%d), %d skipped, %d failures",
+        "cleanup: pruned %d (out-of-scope=%d, old-versions=%d), %d failures",
         stats.total_pruned,
         stats.pruned_out_of_scope,
         stats.pruned_old_versions,
-        stats.skipped_locked,
         len(stats.failures),
     )
     return stats

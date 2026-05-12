@@ -120,14 +120,6 @@ def serve(
              "FORGE_INTERVAL_SECONDS (default 12h). On by default; pass "
              "--no-forge-sync (or FORGE_SYNC=false) to disable.",
     ),
-    forge_download_pdfs: bool = typer.Option(
-        False,
-        "--forge-download-pdfs/--no-forge-download-pdfs",
-        envvar="FORGE_DOWNLOAD_PDFS",
-        help="Additionally download every army-book PDF from Forge into "
-             "<pdf-dir>/forge/ for full-text indexing. Off by default — "
-             "the JSON detail sync already covers unit / upgrade lookups.",
-    ),
     transport: str = typer.Option(
         "auto",
         "--transport",
@@ -149,10 +141,7 @@ def serve(
     With ``--forge-sync`` (the default; disable with ``--no-forge-sync`` or
     ``FORGE_SYNC=false``), a background scheduler runs an immediate one-shot
     scan at startup and re-scans every ``FORGE_INTERVAL_SECONDS`` (default 12h),
-    syncing structured unit / upgrade JSON from Army Forge. PDFs are NOT
-    downloaded by default — set ``--forge-download-pdfs`` (or
-    ``FORGE_DOWNLOAD_PDFS=true``) to additionally mirror army-book PDFs into
-    the watched directory.
+    syncing structured unit / upgrade JSON from Army Forge.
     """
     configure_logging()
     if transport not in {"auto", "stdio", "http"}:
@@ -170,33 +159,17 @@ def serve(
     # responses while the background pass is still running.
     start_initial_ingest_async(pdf_dir)
     start_watcher(pdf_dir)
-    watched: list[Path] = [pdf_dir.resolve()]
 
     if forge_sync:
         from .cleanup_scheduler import CleanupScheduler
         from .cleanup_scheduler import interval_seconds as cleanup_interval
         from .forge import config as fcfg
         from .forge.scheduler import ForgeScheduler
-        target = fcfg.pdf_dir(pdf_dir)
-        target.mkdir(parents=True, exist_ok=True)
-        # If the forge target isn't under an already-watched dir, watch it
-        # too so downloaded books reach the ingest pipeline. Recursive
-        # watchers on a parent dir already cover subdirs.
-        target_resolved = target.resolve()
-        already_watched = any(
-            target_resolved == w or _is_under(target_resolved, w) for w in watched
-        )
-        if not already_watched:
-            start_initial_ingest_async(target)
-            start_watcher(target)
-            watched.append(target_resolved)
         allowed = fcfg.games()
         ForgeScheduler(
-            pdf_dir=target,
             interval_seconds=fcfg.interval_seconds(),
             filters=fcfg.filters(),
             game_systems=allowed,
-            download_pdfs=forge_download_pdfs,
         ).start()
         # Run the retention sweep on its own (typically daily) interval. Tied
         # to forge_sync because it's the forge mirror that grows without
@@ -232,33 +205,12 @@ def serve(
     s.run(transport="streamable-http")
 
 
-def _is_under(child: Path, parent: Path) -> bool:
-    try:
-        child.relative_to(parent)
-    except ValueError:
-        return False
-    return True
-
-
 @app.command(name="forge-scan")
 def forge_scan(
-    pdf_dir: Path | None = typer.Option(
-        None, "--pdf-dir", envvar="FORGE_PDF_DIR",
-        help="Where to download PDFs (only used with --download-pdfs). "
-             "Defaults to <PDF_DIR>/forge if that env var is set, else a "
-             "'forge-pdfs' folder under the user data dir.",
-    ),
     no_download: bool = typer.Option(
         False, "--no-download",
-        help="Dry-run: walk Forge but don't write to the DB or disk and "
+        help="Dry-run: walk Forge but don't write to the DB and "
              "don't prune stale rows.",
-    ),
-    download_pdfs: bool = typer.Option(
-        False, "--download-pdfs/--no-download-pdfs",
-        envvar="FORGE_DOWNLOAD_PDFS",
-        help="Additionally mirror army-book PDFs to <pdf-dir>. Off by "
-             "default — the JSON detail sync alone covers unit / upgrade "
-             "lookups.",
     ),
 ) -> None:
     """One-shot Army Forge scan: refresh structured unit / upgrade JSON.
@@ -267,29 +219,23 @@ def forge_scan(
     (default ``gf,aof``). The scan enumerates every
     ``(book, game_system)`` pair where the book is enabled for that system
     and re-syncs whichever pairs the listing's ``modifiedAt`` says have
-    changed since the last scan. By default only the JSON detail is fetched;
-    pass ``--download-pdfs`` (or set ``FORGE_DOWNLOAD_PDFS=true``) to also
-    mirror the rendered PDF for every changed pair.
+    changed since the last scan.
     """
     configure_logging()
     from .forge import config as fcfg
     from .forge import sync as fsync
-    serve_dir = Path(os.environ["PDF_DIR"]).expanduser() if os.environ.get("PDF_DIR") else None
-    target = pdf_dir or fcfg.pdf_dir(serve_dir)
-    target.mkdir(parents=True, exist_ok=True)
     conn = db.open_db()
     stats = fsync.sync(
-        conn, target,
+        conn,
         filters=fcfg.filters(),
         game_systems=fcfg.games(),
         download=not no_download,
-        download_pdfs=download_pdfs,
         prune=not no_download,
     )
     typer.echo(
-        f"Forge scan: {stats.new} new, {stats.changed} changed, "
+        f"Forge scan: {stats.new} new, "
         f"{stats.unchanged} unchanged, {stats.details_synced} details synced, "
-        f"{len(stats.failed)} failed (of {stats.seen} pair(s)). PDFs at {target}"
+        f"{len(stats.failed)} failed (of {stats.seen} pair(s))."
     )
     if stats.failed:
         for name, err in stats.failed[:10]:
@@ -334,7 +280,7 @@ def cleanup_cmd(
         f"Cleanup: pruned {stats.total_pruned} "
         f"({stats.pruned_out_of_scope} out-of-scope, "
         f"{stats.pruned_old_versions} old versions); "
-        f"{stats.skipped_locked} skipped, {len(stats.failures)} failures"
+        f"{len(stats.failures)} failures"
     )
     if stats.failures:
         for f in stats.failures[:10]:

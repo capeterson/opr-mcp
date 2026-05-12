@@ -187,26 +187,6 @@ def list_books(filt: str = "official") -> list[dict]:
     return list(seen.values())
 
 
-def resolve_pdf(uid: str, game_system: int) -> tuple[str, str, str]:
-    """Resolve a book's PDF for a specific game system.
-
-    Returns ``(cdn_url, pdf_filename, pdf_path)``. ``pdf_path`` embeds the
-    rotating ``renderId`` segment (``army-books/pdfs/<uid>~<gs>/<id>.pdf``)
-    which is the only signal for "this book has been regenerated since we
-    last looked".
-    """
-    data = _http_json(f"{API_HOST}/api/army-books/{uid}/pdf?gameSystem={game_system}")
-    if not isinstance(data, dict):
-        raise ArmyForgeError(
-            f"Unexpected pdf payload for {uid}: {type(data).__name__}"
-        )
-    pdf_path = data.get("pdfPath") or ""
-    pdf_name = data.get("pdfFileName") or ""
-    if not pdf_path:
-        raise ArmyForgeError(f"No pdfPath for {uid} (gs={game_system})")
-    return f"{CDN_HOST}/{pdf_path}", pdf_name, pdf_path
-
-
 def fetch_book_detail(uid: str, game_system: int) -> dict:
     """Fetch the structured army book payload for one (uid, game_system).
 
@@ -223,9 +203,3 @@ def fetch_book_detail(uid: str, game_system: int) -> dict:
             f"{type(data).__name__}"
         )
     return data
-
-
-def render_id_from_path(pdf_path: str) -> str:
-    """Extract the rotating renderId nanoid from a ``pdfPath``."""
-    base = pdf_path.rsplit("/", 1)[-1]
-    return base[:-4] if base.endswith(".pdf") else base

@@ -102,16 +102,7 @@ def ingest_pdf(conn: sqlite3.Connection, path: Path, stats: IngestStats | None =
 
     meta = detect_metadata(path)
     pages = page_count(path)
-
-    # Prefer the Forge-recorded version when this PDF is a Forge mirror; the
-    # banner regex strips the leading "V" but Forge's versionString may carry
-    # extra precision (or fix typos in older books).
-    forge_meta = conn.execute(
-        "SELECT version FROM forge_books WHERE local_path = ? "
-        "ORDER BY last_changed DESC LIMIT 1",
-        (str(path),),
-    ).fetchone()
-    version = (forge_meta["version"] if forge_meta else None) or meta.get("version")
+    version = meta.get("version")
 
     # --- parse phase: PDF parsing, segmentation, embedding inference, and
     # unit/rule parsing all happen WITHOUT holding the SQLite write lock.

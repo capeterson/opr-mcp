@@ -95,16 +95,6 @@ def test_games_unknown_id_raises(monkeypatch):
         fcfg.games()
 
 
-def test_pdf_dir_uses_serve_subdir_when_no_env(monkeypatch, tmp_path):
-    monkeypatch.delenv("FORGE_PDF_DIR", raising=False)
-    assert fcfg.pdf_dir(tmp_path) == tmp_path / "forge"
-
-
-def test_pdf_dir_env_override_wins(monkeypatch, tmp_path):
-    monkeypatch.setenv("FORGE_PDF_DIR", str(tmp_path / "elsewhere"))
-    assert fcfg.pdf_dir(tmp_path / "ignored") == tmp_path / "elsewhere"
-
-
 @pytest.mark.parametrize("val,expected", [
     ("1", True), ("true", True), ("yes", True), ("on", True), ("TRUE", True),
     ("0", False), ("false", False), ("no", False), ("off", False),
@@ -121,18 +111,3 @@ def test_enabled_for_serve_defaults_on(monkeypatch):
     assert fcfg.enabled_for_serve() is True
     monkeypatch.setenv("FORGE_SYNC", "")
     assert fcfg.enabled_for_serve() is True
-
-
-@pytest.mark.parametrize("val,expected", [
-    ("1", True), ("true", True), ("yes", True), ("on", True),
-    ("0", False), ("false", False), ("no", False), ("", False),
-])
-def test_download_pdfs_enabled_explicit(monkeypatch, val, expected):
-    monkeypatch.setenv("FORGE_DOWNLOAD_PDFS", val)
-    assert fcfg.download_pdfs_enabled() is expected
-
-
-def test_download_pdfs_enabled_defaults_off(monkeypatch):
-    """Mirroring PDFs is opt-in — JSON detail alone covers unit lookups."""
-    monkeypatch.delenv("FORGE_DOWNLOAD_PDFS", raising=False)
-    assert fcfg.download_pdfs_enabled() is False
