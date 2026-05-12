@@ -106,10 +106,8 @@ watched for changes while the server runs; SHA-256 dedup makes re-ingesting
 unchanged files a no-op. The directory is created if it does not exist.
 
 Roster data (unit stats, weapons, upgrade groups) does **not** require any
-PDFs in `PDF_DIR` — it comes from the Forge JSON sync. PDF unit-block
-parsing exists as a fallback (toggle via `PDF_PARSE_UNIT_BLOCKS=true`)
-for books that aren't on Forge; the JSON path is more reliable when
-available.
+PDFs in `PDF_DIR` — it comes from the Forge JSON sync. PDFs only
+contribute full-text search content and special-rule prose.
 
 ```bash
 # Manual ingest of a file or directory:
@@ -212,7 +210,6 @@ Only relevant when running with `--transport http` or `AUTH_ENABLED=true`.
 | Name | Default | Purpose |
 |---|---|---|
 | `PDF_DIR` | `/pdf` | Directory of user-supplied PDFs (typically the advanced-rules PDF). Ingested at startup, watched for changes, created if missing. Forge PDF mirror lands at `<PDF_DIR>/forge/` when `FORGE_DOWNLOAD_PDFS=true`. |
-| `PDF_PARSE_UNIT_BLOCKS` | `false` | Have the PDF parser also write to `units` / `unit_upgrades`. Off by default — Forge JSON is the canonical source. Turn on as a fallback for books not on Forge. |
 
 ### Embeddings
 
@@ -372,16 +369,8 @@ Tests stub out the real embedding model so they run offline.
 ## Known limitations
 
 - **Image-only stat blocks** (some army books render unit cards as flattened images)
-  won't yield structured `units` rows when relying on PDF parsing. The Forge JSON
-  path bypasses this entirely and is the default. OCR is out of scope for v1.
-- **Heuristic PDF parser.** With `PDF_PARSE_UNIT_BLOCKS=true` enabled as a
-  fallback, some unit cards in some books fall back to chunk-only storage. Search
-  still finds them; structured `lookup_unit` may miss them. Parse failures are
-  logged with PDF + page numbers.
-- **Upgrade tables (PDF path).** When falling back to PDF parsing, structured
-  upgrade extraction is best-effort line-based parsing of the PyMuPDF text dump.
-  Books with non-standard upgrade-section formatting may yield partial results.
-  The Forge JSON path doesn't have this limitation.
+  are not parsed; the Forge JSON path is the sole source of structured unit data.
+  OCR is out of scope for v1.
 - **No reranker.** RRF over BM25 + vector is good enough at this corpus size.
 
 ## Out of scope

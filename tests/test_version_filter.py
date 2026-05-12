@@ -155,8 +155,8 @@ def test_filtered_doc_ids_returns_both_forge_api_and_pdf_at_same_version(tmp_db)
     no explicit version pin is in play, ``filtered_document_ids`` must
     return both so the unit-side caller's JOIN finds the API doc and the
     rule-side caller's JOIN finds the PDF doc. Returning only the
-    most-recently-ingested one (PDF, ordinarily) hides the API doc and
-    breaks ``lookup_unit`` whenever ``PDF_PARSE_UNIT_BLOCKS`` is off.
+    most-recently-ingested one (PDF, ordinarily) would hide the API doc
+    and break ``lookup_unit`` — the PDF doc never carries unit rows.
     """
     conn = db.open_db(tmp_db)
     api_doc = _seed_doc(conn, path="forge-api://U~4", sha="h-api",

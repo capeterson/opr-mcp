@@ -48,17 +48,6 @@ def instructions_file() -> Path | None:
     return Path(raw).expanduser()
 
 
-def pdf_parse_unit_blocks() -> bool:
-    """Whether the PDF parser should write to ``units`` / ``unit_upgrades``.
-
-    Defaults to off because the Forge JSON ingest path is authoritative
-    for stats and upgrades. Flip to true to keep PDF-derived rows
-    around for any book the JSON ingest can't reach (e.g. user-supplied
-    PDFs not on Forge).
-    """
-    return _bool_env("PDF_PARSE_UNIT_BLOCKS", False)
-
-
 def configure_logging() -> None:
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(

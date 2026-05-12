@@ -8,7 +8,7 @@ import pytest
 
 from opr_mcp import db
 from opr_mcp.ingest.pipeline import ingest_pdf
-from opr_mcp.tools import get_special_rule, lists, lookup_unit, search_rules
+from opr_mcp.tools import get_special_rule, lists, search_rules
 
 
 def _make_pdf(path: Path) -> Path:
@@ -55,11 +55,7 @@ def _make_pdf(path: Path) -> Path:
 
 
 @pytest.fixture
-def ingested_db(tmp_db, tmp_path, monkeypatch):
-    # The PDF unit/upgrade parser is gated off by default — Forge JSON ingest
-    # owns those rows in production. Integration tests still want to verify
-    # the end-to-end PDF path works, so flip the flag on for them.
-    monkeypatch.setenv("PDF_PARSE_UNIT_BLOCKS", "true")
+def ingested_db(tmp_db, tmp_path):
     pdf = _make_pdf(tmp_path / "core.pdf")
     conn = db.open_db(tmp_db)
     ingest_pdf(conn, pdf)
@@ -226,14 +222,6 @@ def test_get_special_rule_strips_parameters(ingested_db):
     assert r is not None
     assert r["name"].lower() == "tough"
     assert r["parametric"] is True
-
-
-def test_lookup_unit(ingested_db):
-    rows = lookup_unit.run(ingested_db, "Battle Brothers")
-    assert any(row["name"] == "Battle Brothers" for row in rows)
-    bb = next(row for row in rows if row["name"] == "Battle Brothers")
-    assert bb["quality"] == "4+"
-    assert bb["defense"] == "5+"
 
 
 def test_list_documents(ingested_db):

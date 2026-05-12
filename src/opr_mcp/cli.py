@@ -345,8 +345,7 @@ def cleanup_cmd(
 def _print_summary(stats: IngestStats) -> None:
     typer.echo(
         f"Ingest summary: {stats.documents} docs, {stats.skipped} skipped, "
-        f"{stats.chunks} chunks, {stats.units} units (+{stats.units_skipped} skipped), "
-        f"{stats.rules} rules"
+        f"{stats.chunks} chunks, {stats.rules} rules"
     )
 
 
