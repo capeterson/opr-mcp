@@ -207,9 +207,9 @@ def serve(
         ).start()
 
     if host is not None:
-        os.environ["SERVER_HOST"] = host
+        os.environ["HOST"] = host
     if port is not None:
-        os.environ["SERVER_PORT"] = str(port)
+        os.environ["PORT"] = str(port)
 
     use_http = transport == "http" or (transport == "auto" and auth_enabled())
 

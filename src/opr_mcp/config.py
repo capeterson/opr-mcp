@@ -113,11 +113,11 @@ def auth_enabled() -> bool:
 
 
 def http_host() -> str:
-    return os.environ.get("SERVER_HOST", DEFAULT_HTTP_HOST)
+    return os.environ.get("HOST", DEFAULT_HTTP_HOST)
 
 
 def http_port() -> int:
-    return _int_env("SERVER_PORT", DEFAULT_HTTP_PORT)
+    return _int_env("PORT", DEFAULT_HTTP_PORT)
 
 
 # Hostnames we allow over plain HTTP for local development.

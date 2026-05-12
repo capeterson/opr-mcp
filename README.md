@@ -204,8 +204,8 @@ Only relevant when running with `--transport http` or `AUTH_ENABLED=true`.
 
 | Name | Default | Purpose |
 |---|---|---|
-| `SERVER_HOST` | `127.0.0.1` | HTTP bind host. Overridable per-invocation with `--host`. |
-| `SERVER_PORT` | `8765` | HTTP bind port. Overridable per-invocation with `--port`. |
+| `HOST` | `127.0.0.1` | HTTP bind host. Overridable per-invocation with `--host`. |
+| `PORT` | `8765` | HTTP bind port. Overridable per-invocation with `--port`. |
 
 ### PDF ingest
 
