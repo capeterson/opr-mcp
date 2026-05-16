@@ -9,7 +9,7 @@ Hand-curated regression suite covering five PDFs from ``opr-data/``:
   gf__wopr4xvwa51xh3mc__x120dvud4-c_5ap2w1u0d.jpg.pdf (Knight Prime Brothers v3.5.2)
 
 Each "claim" was hand-extracted from the corresponding PDF text dump
-under ``tests/_local_corpus_cache/pdf_text/`` (produced by pymupdf).
+under ``scripts/corpus_validation/_cache/pdf_text/`` (produced by pymupdf).
 The script then asks the MCP server (via its actual tool functions)
 for the same data and reports per-claim PASS/FAIL.
 
@@ -33,7 +33,7 @@ import numpy as np
 # (so we don't need the 130 MB BGE model on this run).
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
-os.environ["DB_PATH"] = str(REPO / "tests" / "_local_corpus_cache" / "corpus.db")
+os.environ["DB_PATH"] = str(REPO / "scripts" / "corpus_validation" / "_cache" / "corpus.db")
 os.environ["EMBED_MODEL"] = "stub"
 
 from opr_mcp import embeddings as _emb  # noqa: E402
@@ -803,7 +803,7 @@ def main():
     else:
         print("All claims passed.")
 
-    out = REPO / "tests" / "_local_corpus_cache" / "validation_5pdfs.json"
+    out = REPO / "scripts" / "corpus_validation" / "_cache" / "validation_5pdfs.json"
     out.write_text(json.dumps(
         {
             "summary": {"total": total, "passed": passed,

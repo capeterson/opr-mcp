@@ -8,7 +8,7 @@ all of one system.
 
 Run::
 
-    uv run python tests/_local_corpus_cache/bucket.py 6
+    uv run python scripts/corpus_validation/bucket.py 6
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ import sys
 from pathlib import Path
 
 THIS = Path(__file__).resolve()
-CACHE = THIS.parent
-CORPUS = CACHE.parent.parent / "opr-data"
+CACHE = THIS.parent / "_cache"
+CORPUS = THIS.parent.parent.parent / "opr-data"
 DUMPS = CACHE / "dumps"
 
 # Pattern from real filenames:

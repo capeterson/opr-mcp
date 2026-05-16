@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from opr_mcp import cleanup, db
+from opr_mcp.versioning import version_key
 
 
 def _add_forge_book(
@@ -116,7 +117,7 @@ def test_sweep_does_not_touch_manual_pdfs(tmp_db, tmp_path):
 
 
 def test_version_key_orders_correctly():
-    keys = sorted(["1.10.0", "1.9.0", "1.10.1", "0.9.9"], key=cleanup._version_key)
+    keys = sorted(["1.10.0", "1.9.0", "1.10.1", "0.9.9"], key=version_key)
     assert keys == ["0.9.9", "1.9.0", "1.10.0", "1.10.1"]
 
 
