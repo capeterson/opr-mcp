@@ -46,8 +46,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 PDF_DIR = REPO / "opr-data"
-TEXT_DIR = REPO / "scripts" / "corpus_validation" / "_cache" / "pdf_text"
-DUMPS_DIR = REPO / "scripts" / "corpus_validation" / "_cache" / "dumps"
+TEXT_DIR = REPO / "tests" / "_local_corpus_cache" / "pdf_text"
+DUMPS_DIR = REPO / "tests" / "_local_corpus_cache" / "dumps"
 
 
 # --------------------------------------------------------------------------
@@ -787,7 +787,7 @@ def main():
     ap.add_argument("--show", type=int, default=20,
                     help="Show this many sample findings per error class.")
     ap.add_argument("--out", type=Path,
-                    default=REPO / "scripts" / "corpus_validation" / "_cache" /
+                    default=REPO / "tests" / "_local_corpus_cache" /
                             "validation_corpus.json",
                     help="Where to write the full per-finding JSON report.")
     args = ap.parse_args()
