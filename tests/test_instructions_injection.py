@@ -37,23 +37,25 @@ from types import SimpleNamespace
 import pytest
 from mcp.server.fastmcp import Context
 
-import opr_mcp.server as server_module
 from opr_mcp import indexing_status
 from opr_mcp.server import (
     _FORCE_ORG_SUMMARY,
     _FORCE_ORG_SUMMARY_OVERRIDE_POINTER,
-    _INSTRUCTIONS_RESOURCE_URI,
-    _finalize,
-    _load_instructions,
-    _short_summary,
+    TOOL_DOCSTRING_PREAMBLE,
+    ServerContext,
+    SessionTracker,
     build_server,
+    finalize,
+    load_instructions_text,
+    short_summary,
 )
+from opr_mcp.server.instructions import _INSTRUCTIONS_RESOURCE_URI
 
 
 class _FakeSession:
     """Stand-in for mcp.server.session.ServerSession.
 
-    ``_finalize`` only needs an object that's hashable, weak-referenceable,
+    ``finalize`` only needs an object that's hashable, weak-referenceable,
     and stable across calls within one logical session. A plain class
     instance gives us all three with default identity semantics.
     """
@@ -70,14 +72,26 @@ def _fake_ctx() -> Context:
     return Context(request_context=rc)
 
 
+@pytest.fixture
+def srv() -> ServerContext:
+    """A minimal ServerContext for finalize tests.
+
+    No DB connection, no auth provider, fresh SessionTracker, real
+    instructions text loaded from the bundled resource. Each test gets
+    its own instance so session-tracking state is isolated automatically.
+    """
+    return ServerContext(
+        content_conn=None,
+        auth_provider=None,
+        session_tracker=SessionTracker(),
+        instructions_text=load_instructions_text(),
+    )
+
+
 @pytest.fixture(autouse=True)
-def _reset_state():
-    server_module._reset_session_state_for_tests()
-    server_module._cached_instructions = None
+def _reset_indexing():
     indexing_status.reset_for_tests()
     yield
-    server_module._reset_session_state_for_tests()
-    server_module._cached_instructions = None
     indexing_status.reset_for_tests()
 
 
@@ -87,7 +101,7 @@ def _reset_state():
 
 
 def test_full_instructions_cover_force_org_and_hero_attachment():
-    text = _load_instructions()
+    text = load_instructions_text()
     assert "Force organization rules" in text
     assert "Heroes attached to units" in text
     # The hero-attachment guidance must spell out that the combined formation
@@ -97,43 +111,44 @@ def test_full_instructions_cover_force_org_and_hero_attachment():
 
 
 def test_instructions_md_is_packaged():
-    pkg_root = Path(server_module.__file__).parent
+    import opr_mcp
+    pkg_root = Path(opr_mcp.__file__).parent
     assert (pkg_root / "instructions.md").is_file()
 
 
 # ---------------------------------------------------------------------------
-# _finalize injection behavior — first call attaches full instructions +
+# finalize injection behavior — first call attaches full instructions +
 # reminder; warning is suppressed on first call.
 # ---------------------------------------------------------------------------
 
 
-def test_first_call_attaches_instructions_field():
+def test_first_call_attaches_instructions_field(srv):
     indexing_status.mark_initial_completed()
     ctx = _fake_ctx()
-    out = _finalize([{"a": 1}], ctx)
+    out = finalize([{"a": 1}], ctx, srv=srv)
     assert out["results"] == [{"a": 1}]
-    assert out["instructions"] == _load_instructions()
+    assert out["instructions"] == srv.instructions_text
     assert out["force_org_reminder"] == _FORCE_ORG_SUMMARY
     assert "force_org_warning" not in out
     assert "indexing" not in out
 
 
-def test_warning_does_not_appear_on_first_call():
+def test_warning_does_not_appear_on_first_call(srv):
     """The full ``instructions`` field already covers what the warning
     says; layering both on the same response would be redundant noise.
     """
     indexing_status.mark_initial_completed()
     ctx = _fake_ctx()
-    out = _finalize([{"a": 1}], ctx)
+    out = finalize([{"a": 1}], ctx, srv=srv)
     assert "instructions" in out
     assert "force_org_warning" not in out
 
 
-def test_second_call_in_same_session_does_not_reinject():
+def test_second_call_in_same_session_does_not_reinject(srv):
     indexing_status.mark_initial_completed()
     ctx = _fake_ctx()
-    _finalize([{"a": 1}], ctx)
-    second = _finalize([{"a": 2}], ctx)
+    finalize([{"a": 1}], ctx, srv=srv)
+    second = finalize([{"a": 2}], ctx, srv=srv)
     assert second["results"] == [{"a": 2}]
     assert "instructions" not in second
     # Reminder fires on every call so clients that strip first-call
@@ -143,83 +158,83 @@ def test_second_call_in_same_session_does_not_reinject():
     assert "force_org_warning" in second
 
 
-def test_two_distinct_sessions_each_get_instructions_once():
+def test_two_distinct_sessions_each_get_instructions_once(srv):
     indexing_status.mark_initial_completed()
     ctx_a = _fake_ctx()
     ctx_b = _fake_ctx()
-    out_a = _finalize([{"x": 1}], ctx_a)
-    out_b = _finalize([{"x": 2}], ctx_b)
+    out_a = finalize([{"x": 1}], ctx_a, srv=srv)
+    out_b = finalize([{"x": 2}], ctx_b, srv=srv)
     assert "instructions" in out_a
     assert "instructions" in out_b
     # And neither re-injects on its own follow-up call.
-    second_a = _finalize([{"x": 3}], ctx_a)
-    second_b = _finalize([{"x": 4}], ctx_b)
+    second_a = finalize([{"x": 3}], ctx_a, srv=srv)
+    second_b = finalize([{"x": 4}], ctx_b, srv=srv)
     assert "instructions" not in second_a
     assert "instructions" not in second_b
     assert second_a["results"] == [{"x": 3}]
     assert second_b["results"] == [{"x": 4}]
 
 
-def test_no_ctx_means_no_injection():
+def test_no_ctx_means_no_injection(srv):
     """Backward compat: callers that pass ctx=None get the bare payload.
 
     The existing tests in test_indexing_status.py rely on this via the
-    `_with_status(payload)` shim, and tools called with `tool.fn(...)` in
+    `with_status(payload)` shim, and tools called with `tool.fn(...)` in
     other tests rely on it via the `ctx: Context | None = None` default.
     """
     indexing_status.mark_initial_completed()
-    assert _finalize([{"a": 1}], None) == [{"a": 1}]
-    assert _finalize({"x": 2}, None) == {"x": 2}
-    assert _finalize(None, None) is None
+    assert finalize([{"a": 1}], None, srv=srv) == [{"a": 1}]
+    assert finalize({"x": 2}, None, srv=srv) == {"x": 2}
+    assert finalize(None, None, srv=srv) is None
 
 
-def test_indexing_and_instructions_coexist_on_first_call():
+def test_indexing_and_instructions_coexist_on_first_call(srv):
     ctx = _fake_ctx()
     with indexing_status.track("startup ingest"):
-        out = _finalize([{"a": 1}], ctx)
+        out = finalize([{"a": 1}], ctx, srv=srv)
     assert out["results"] == [{"a": 1}]
     assert out["indexing"]["in_progress"] is True
     assert "warning" in out["indexing"]
-    assert out["instructions"] == _load_instructions()
+    assert out["instructions"] == srv.instructions_text
     assert out["force_org_reminder"] == _FORCE_ORG_SUMMARY
 
 
-def test_dict_payload_merges_instructions_field():
+def test_dict_payload_merges_instructions_field(srv):
     indexing_status.mark_initial_completed()
     ctx = _fake_ctx()
-    out = _finalize({"name": "Tough"}, ctx)
+    out = finalize({"name": "Tough"}, ctx, srv=srv)
     assert out["name"] == "Tough"
-    assert out["instructions"] == _load_instructions()
+    assert out["instructions"] == srv.instructions_text
     assert out["force_org_reminder"] == _FORCE_ORG_SUMMARY
 
 
-def test_scalar_payload_wraps_under_result_key():
+def test_scalar_payload_wraps_under_result_key(srv):
     indexing_status.mark_initial_completed()
     ctx = _fake_ctx()
-    out = _finalize("some-string", ctx)
+    out = finalize("some-string", ctx, srv=srv)
     assert out["result"] == "some-string"
-    assert out["instructions"] == _load_instructions()
+    assert out["instructions"] == srv.instructions_text
     assert out["force_org_reminder"] == _FORCE_ORG_SUMMARY
 
 
-def test_none_payload_with_injection():
+def test_none_payload_with_injection(srv):
     indexing_status.mark_initial_completed()
     ctx = _fake_ctx()
-    out = _finalize(None, ctx)
+    out = finalize(None, ctx, srv=srv)
     assert out["result"] is None
-    assert out["instructions"] == _load_instructions()
+    assert out["instructions"] == srv.instructions_text
     assert out["force_org_reminder"] == _FORCE_ORG_SUMMARY
 
 
-def test_diagnostic_kind_suppresses_warning():
+def test_diagnostic_kind_suppresses_warning(srv):
     """``index_status`` passes ``kind="diagnostic"`` so its responses
     never carry a force-org warning — the tool isn't part of any
     army-building flow.
     """
     indexing_status.mark_initial_completed()
     ctx = _fake_ctx()
-    _finalize([{"a": 1}], ctx)  # consume first-call injection
-    out = _finalize({"in_progress": False}, ctx, kind="diagnostic")
+    finalize([{"a": 1}], ctx, srv=srv)  # consume first-call injection
+    out = finalize({"in_progress": False}, ctx, srv=srv, kind="diagnostic")
     assert "force_org_warning" not in out
     # Reminder still fires; the warning is the only thing kind suppresses.
     assert out["force_org_reminder"] == _FORCE_ORG_SUMMARY
@@ -230,7 +245,7 @@ def test_diagnostic_kind_suppresses_warning():
 # ---------------------------------------------------------------------------
 
 
-def test_weakref_releases_dead_session():
+def test_weakref_releases_dead_session(srv):
     """A GC'd session must not keep its slot in the greeted-set.
 
     Guards the `WeakSet` choice over a plain `set[int(id())]`: under id()
@@ -239,29 +254,29 @@ def test_weakref_releases_dead_session():
     """
     indexing_status.mark_initial_completed()
     ctx_dead = _fake_ctx()
-    _finalize([{"a": 1}], ctx_dead)
-    assert len(server_module._greeted_sessions) == 1
+    finalize([{"a": 1}], ctx_dead, srv=srv)
+    assert len(srv.session_tracker.greeted_sessions) == 1
 
     del ctx_dead
     gc.collect()
-    assert len(server_module._greeted_sessions) == 0
+    assert len(srv.session_tracker.greeted_sessions) == 0
 
     # A new session must still be greeted on its first call.
     ctx_new = _fake_ctx()
-    out = _finalize([{"b": 1}], ctx_new)
+    out = finalize([{"b": 1}], ctx_new, srv=srv)
     assert "instructions" in out
 
 
-def test_weakref_releases_dead_acknowledged_session():
+def test_weakref_releases_dead_acknowledged_session(srv):
     """Same WeakSet contract for the acknowledgement set."""
     indexing_status.mark_initial_completed()
     ctx_dead = _fake_ctx()
-    server_module._mark_acknowledged(ctx_dead)
-    assert len(server_module._acknowledged_sessions) == 1
+    srv.session_tracker.mark_acknowledged(ctx_dead)
+    assert len(srv.session_tracker.acknowledged_sessions) == 1
 
     del ctx_dead
     gc.collect()
-    assert len(server_module._acknowledged_sessions) == 0
+    assert len(srv.session_tracker.acknowledged_sessions) == 0
 
 
 def test_instructions_file_override_flows_through_injection(monkeypatch, tmp_path):
@@ -270,11 +285,18 @@ def test_instructions_file_override_flows_through_injection(monkeypatch, tmp_pat
     custom = tmp_path / "custom.md"
     custom.write_text("CUSTOM GUIDANCE BODY", encoding="utf-8")
     monkeypatch.setenv("INSTRUCTIONS_FILE", str(custom))
-    server_module._cached_instructions = None
     indexing_status.mark_initial_completed()
 
+    # Build a fresh srv after setenv so it picks up the override.
+    srv = ServerContext(
+        content_conn=None,
+        auth_provider=None,
+        session_tracker=SessionTracker(),
+        instructions_text=load_instructions_text(),
+    )
+
     ctx = _fake_ctx()
-    out = _finalize([{"a": 1}], ctx)
+    out = finalize([{"a": 1}], ctx, srv=srv)
     assert out["instructions"] == "CUSTOM GUIDANCE BODY"
 
 
@@ -283,14 +305,14 @@ def test_instructions_file_override_flows_through_injection(monkeypatch, tmp_pat
 # ---------------------------------------------------------------------------
 
 
-def test_warning_appears_on_subsequent_calls_when_unacknowledged():
+def test_warning_appears_on_subsequent_calls_when_unacknowledged(srv):
     indexing_status.mark_initial_completed()
     ctx = _fake_ctx()
-    first = _finalize([{"a": 1}], ctx)
+    first = finalize([{"a": 1}], ctx, srv=srv)
     assert "force_org_warning" not in first  # first call: full instructions
-    second = _finalize([{"a": 2}], ctx)
+    second = finalize([{"a": 2}], ctx, srv=srv)
     assert "force_org_warning" in second
-    third = _finalize([{"a": 3}], ctx)
+    third = finalize([{"a": 3}], ctx, srv=srv)
     assert "force_org_warning" in third  # still unacknowledged
 
 
@@ -342,18 +364,18 @@ def test_tool_signatures_accept_ctx_kwarg():
     """All registered tools must take a ctx kwarg so FastMCP can inject it.
 
     Calling tool.fn() with a fresh Context and verifying the response shape
-    confirms (a) the kwarg exists, and (b) it routes through _finalize to
-    the injection path.
+    confirms (a) the kwarg exists, and (b) it routes through finalize to
+    the injection path. Each iteration builds a new server so its
+    SessionTracker starts fresh.
     """
     indexing_status.mark_initial_completed()
-    server = build_server()
     tool_names = [
         "list_armies",
         "list_documents",
         "index_status",
     ]  # tools that need no DB content to return successfully
     for name in tool_names:
-        server_module._reset_session_state_for_tests()
+        server = build_server()
         ctx = _fake_ctx()
         tool = server._tool_manager._tools[name]
         out = tool.fn(ctx=ctx)
@@ -375,7 +397,7 @@ def test_force_org_guidance_tool_is_registered():
 def test_force_org_guidance_tool_returns_full_text_with_no_envelope():
     """The dedicated tool returns a bare string, NOT a dict envelope.
 
-    Routing through ``_finalize`` would attach reminder/warning siblings,
+    Routing through ``finalize`` would attach reminder/warning siblings,
     but the response IS the full guidance — those siblings are redundant
     and would force the model to parse a dict for what should be plain
     text.
@@ -384,7 +406,7 @@ def test_force_org_guidance_tool_returns_full_text_with_no_envelope():
     ctx = _fake_ctx()
     out = server._tool_manager._tools["force_org_guidance"].fn(ctx=ctx)
     assert isinstance(out, str)
-    assert out == _load_instructions()
+    assert out == load_instructions_text()
 
 
 def test_handshake_instructions_advertises_dedicated_tool():
@@ -413,6 +435,34 @@ def test_resource_returns_full_instructions():
     assert _INSTRUCTIONS_RESOURCE_URI in server._resource_manager._resources
 
 
+def test_tool_docstrings_start_with_canonical_preamble():
+    """Every army-building tool must lead with TOOL_DOCSTRING_PREAMBLE.
+
+    Catches drift: if someone tweaks the wording on one tool without
+    updating the others (or the canonical constant), the assertion
+    fires. The diagnostic ``index_status``, ``list_documents``, and
+    ``force_org_guidance`` itself opt out — they aren't army-building.
+    """
+    server = build_server()
+    army_building_tools = [
+        "search_rules",
+        "lookup_unit",
+        "get_special_rule",
+        "list_armies",
+        "list_units",
+    ]
+    # The docstring source lines may include leading whitespace (8 spaces
+    # from being indented inside a function); the preamble constant
+    # is unindented. Normalize by stripping each line.
+    expected_lines = [ln.strip() for ln in TOOL_DOCSTRING_PREAMBLE.splitlines()]
+    for name in army_building_tools:
+        doc = server._tool_manager._tools[name].fn.__doc__ or ""
+        actual_lines = [ln.strip() for ln in doc.splitlines()[: len(expected_lines)]]
+        assert actual_lines == expected_lines, (
+            f"{name} docstring does not start with TOOL_DOCSTRING_PREAMBLE"
+        )
+
+
 # ---------------------------------------------------------------------------
 # INSTRUCTIONS_FILE override must propagate to the short-summary channels,
 # otherwise the hardcoded AoF/GF rules contradict whatever custom guidance
@@ -421,14 +471,14 @@ def test_resource_returns_full_instructions():
 
 
 def test_short_summary_is_default_when_no_override():
-    assert _short_summary() == _FORCE_ORG_SUMMARY
+    assert short_summary() == _FORCE_ORG_SUMMARY
 
 
 def test_short_summary_degrades_to_pointer_when_override_set(monkeypatch, tmp_path):
     custom = tmp_path / "custom.md"
     custom.write_text("CUSTOM GUIDANCE BODY", encoding="utf-8")
     monkeypatch.setenv("INSTRUCTIONS_FILE", str(custom))
-    assert _short_summary() == _FORCE_ORG_SUMMARY_OVERRIDE_POINTER
+    assert short_summary() == _FORCE_ORG_SUMMARY_OVERRIDE_POINTER
 
 
 def test_handshake_uses_override_pointer_when_INSTRUCTIONS_FILE_set(
@@ -453,11 +503,16 @@ def test_reminder_uses_override_pointer_when_INSTRUCTIONS_FILE_set(
     custom = tmp_path / "custom.md"
     custom.write_text("CUSTOM GUIDANCE BODY", encoding="utf-8")
     monkeypatch.setenv("INSTRUCTIONS_FILE", str(custom))
-    server_module._cached_instructions = None
     indexing_status.mark_initial_completed()
+    srv = ServerContext(
+        content_conn=None,
+        auth_provider=None,
+        session_tracker=SessionTracker(),
+        instructions_text=load_instructions_text(),
+    )
     ctx = _fake_ctx()
-    _finalize([{"a": 1}], ctx)  # consume first-call injection
-    out = _finalize([{"a": 2}], ctx)
+    finalize([{"a": 1}], ctx, srv=srv)  # consume first-call injection
+    out = finalize([{"a": 2}], ctx, srv=srv)
     assert out["force_org_reminder"] == _FORCE_ORG_SUMMARY_OVERRIDE_POINTER
 
 
@@ -467,7 +522,6 @@ def test_embedded_summary_uses_override_pointer_when_INSTRUCTIONS_FILE_set(
     custom = tmp_path / "custom.md"
     custom.write_text("CUSTOM GUIDANCE BODY", encoding="utf-8")
     monkeypatch.setenv("INSTRUCTIONS_FILE", str(custom))
-    server_module._cached_instructions = None
     indexing_status.mark_initial_completed()
     server = build_server()
     ctx = _fake_ctx()

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import ENRICH_UNIT_COLUMNS, enrich_unit_rows, filtered_document_ids
+from . import enrich_unit_rows, enrich_unit_select, filtered_document_ids
 
 
 def _normalize(s: str) -> str:
@@ -52,7 +52,7 @@ def run(
 
     placeholders = ",".join("?" * len(doc_ids))
     sql = f"""
-        SELECT {ENRICH_UNIT_COLUMNS}
+        SELECT {enrich_unit_select()}
         FROM units u
         JOIN documents d ON d.id = u.document_id
         LEFT JOIN chunks c ON c.id = u.chunk_id
