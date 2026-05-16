@@ -17,30 +17,16 @@ user removes them from the watched directory or runs ``opr-mcp remove``.
 from __future__ import annotations
 
 import logging
-import re
 import sqlite3
 from dataclasses import dataclass, field
 
 from .forge import sync as forge_sync
 from .ingest import forge_book
+from .versioning import version_key
 
 log = logging.getLogger(__name__)
 
 DEFAULT_RETAIN_VERSIONS = 3
-
-_VERSION_NUM_RE = re.compile(r"\d+")
-
-
-def _version_key(version: str | None) -> tuple[int, ...]:
-    """Sortable key for a Forge version string ('3.5.3' → (3,5,3)).
-
-    Unparseable / missing strings sort lowest so any real version wins over
-    them when picking 'latest'.
-    """
-    if not version:
-        return ()
-    parts = _VERSION_NUM_RE.findall(version)
-    return tuple(int(p) for p in parts) if parts else ()
 
 
 @dataclass
@@ -94,7 +80,7 @@ def sweep(
     for group in by_book.values():
         # Newest first: highest version tuple, with last_changed as tie-breaker.
         group.sort(
-            key=lambda r: (_version_key(r["version"]), r["last_changed"] or ""),
+            key=lambda r: (version_key(r["version"]), r["last_changed"] or ""),
             reverse=True,
         )
         for r in group[retain_versions:]:
@@ -107,7 +93,7 @@ def sweep(
     dropped_pairs: set[tuple[str, int]] = set()
     for r, reason in to_drop:
         try:
-            forge_sync._drop_forge_version(
+            forge_sync.drop_forge_version(
                 conn,
                 uid=r["uid"],
                 game_system=r["game_system"],
@@ -138,7 +124,7 @@ def sweep(
         ).fetchone()
         if remaining is not None:
             continue
-        forge_sync._delete_ingested_document(
+        forge_sync.delete_ingested_document(
             conn, path=forge_book.synthetic_path(uid, gid),
         )
         conn.commit()

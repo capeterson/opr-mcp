@@ -19,6 +19,15 @@ Every Forge request passes through the shared rate limiter in
 :mod:`opr_mcp.forge.api`, so a fresh sync can't burst on the OPR
 services. The default 3s spacing makes parallelism pointless; this
 module is single-threaded by design.
+
+Public retention API
+--------------------
+``drop_forge_version`` and ``delete_ingested_document`` are the
+deletion primitives used both by this module's own pruning loop and by
+``opr_mcp.cleanup.sweep``. They're kept here (rather than in
+``cleanup.py``) so the unique-key shape of ``forge_books`` and the
+``documents`` UNIQUE(path) lookup stay co-located with the rest of
+this module's schema knowledge.
 """
 from __future__ import annotations
 
@@ -71,7 +80,7 @@ def _official_scope_for_filters(filters: list[str]) -> list[int]:
     return scope
 
 
-def _delete_ingested_document(
+def delete_ingested_document(
     conn: sqlite3.Connection, *, path: str | None,
 ) -> None:
     """Drop the ``documents`` row (and chunks_vec siblings) for a path.
@@ -100,7 +109,7 @@ def _delete_ingested_document(
     conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
 
 
-def _drop_forge_version(
+def drop_forge_version(
     conn: sqlite3.Connection,
     *,
     uid: str,
@@ -147,7 +156,7 @@ def _prune_stale(
         key = (r["uid"], r["game_system"])
         if key in expected:
             continue
-        if _drop_forge_version(
+        if drop_forge_version(
             conn,
             uid=r["uid"],
             game_system=r["game_system"],
@@ -163,7 +172,7 @@ def _prune_stale(
     # Also drop the synthetic API document — its (uid, gs) is no longer
     # in the listing, so the structured units/upgrades it owns are stale.
     for uid, gid in pruned_pairs:
-        _delete_ingested_document(
+        delete_ingested_document(
             conn, path=forge_book.synthetic_path(uid, gid),
         )
         conn.commit()
