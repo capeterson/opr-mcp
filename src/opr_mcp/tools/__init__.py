@@ -5,15 +5,9 @@ import json
 import re
 import sqlite3
 
-_VERSION_NUM_RE = re.compile(r"\d+")
+from ..versioning import version_key
+
 _PARAM_RE = re.compile(r"\s*\([^)]*\)\s*$")
-
-
-def _version_key(version: str | None) -> tuple[int, ...]:
-    if not version:
-        return ()
-    parts = _VERSION_NUM_RE.findall(version)
-    return tuple(int(p) for p in parts) if parts else ()
 
 
 def strip_param(name: str) -> str:
@@ -77,28 +71,65 @@ def filtered_document_ids(
     out: list[int] = []
     for group in by_bucket.values():
         group.sort(
-            key=lambda r: (_version_key(r["version"]), r["ingested_at"] or ""),
+            key=lambda r: (version_key(r["version"]), r["ingested_at"] or ""),
             reverse=True,
         )
-        top_version = _version_key(group[0]["version"])
+        top_version = version_key(group[0]["version"])
         # Pick every doc at the top version, not just one. Same-version
         # forge-api + PDF docs both belong to the "latest" Forge book —
         # excluding the API doc would leave unit queries empty when the
         # PDF doc happened to be ingested later.
         for r in group:
-            if _version_key(r["version"]) == top_version:
+            if version_key(r["version"]) == top_version:
                 out.append(r["id"])
     return out
 
 
 # Columns the units row passed to :func:`enrich_unit_rows` must select.
 # Both ``lookup_unit`` and ``list_units(details=True)`` build their SELECT
-# from this list so the helper can index every column it needs.
-ENRICH_UNIT_COLUMNS = (
-    "u.id, u.document_id, u.army, u.name, u.qty, u.quality, u.defense, "
-    "u.base_points, u.equipment_json, u.rules_json, "
-    "d.filename, d.version, d.game_system, c.page"
+# from ``enrich_unit_select()`` so the helper can index every column it
+# needs without callers duplicating the column list.
+#
+# Stored as a tuple so adding/removing a column requires editing one
+# Python literal — and ``enrich_unit_select()`` produces the SQL fragment
+# while ``enrich_unit_rows`` reads from the row by name. The shared
+# definition keeps the SELECT and the row accessor in lock-step.
+_ENRICH_UNIT_COLUMNS: tuple[str, ...] = (
+    "u.id",
+    "u.document_id",
+    "u.army",
+    "u.name",
+    "u.qty",
+    "u.quality",
+    "u.defense",
+    "u.base_points",
+    "u.equipment_json",
+    "u.rules_json",
+    "d.filename",
+    "d.version",
+    "d.game_system",
+    "c.page",
 )
+
+
+def enrich_unit_select() -> str:
+    """SQL fragment listing the columns ``enrich_unit_rows`` reads.
+
+    Use this in the SELECT clause when querying units for enrichment::
+
+        sql = f"SELECT {enrich_unit_select()} FROM units u ..."
+
+    Callers must include the LEFT JOIN on ``chunks c`` (for ``c.page``)
+    even when no page is known — ``page`` may be NULL but the column
+    must exist in the row.
+    """
+    return ", ".join(_ENRICH_UNIT_COLUMNS)
+
+
+# Back-compat: the SQL-fragment string form. Prefer ``enrich_unit_select()``
+# in new code. Kept so external callers and tests that imported the
+# constant don't break.
+ENRICH_UNIT_COLUMNS = enrich_unit_select()
 
 
 def enrich_unit_rows(
@@ -115,7 +146,7 @@ def enrich_unit_rows(
     N+1 pattern. Optionally bulk-fetches ``special_rules`` descriptions
     for every rule name referenced by any of the input rows.
 
-    ``rows`` must select the columns named in :data:`ENRICH_UNIT_COLUMNS`
+    ``rows`` must select the columns returned by :func:`enrich_unit_select`
     (``c.page`` may be NULL via LEFT JOIN; everything else is required).
 
     ``rule_doc_ids`` controls which documents the rule-text enrichment

@@ -12,7 +12,7 @@ review disjoint items.
 
 Usage::
 
-    uv run python tests/_local_corpus_cache/prep_briefs.py 6 --pdfs-per-agent 3
+    uv run python scripts/corpus_validation/prep_briefs.py 6 --pdfs-per-agent 3
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from pathlib import Path
 import pymupdf
 
 THIS = Path(__file__).resolve()
-CACHE = THIS.parent
-CORPUS = CACHE.parent.parent / "opr-data"
+CACHE = THIS.parent / "_cache"
+CORPUS = THIS.parent.parent.parent / "opr-data"
 DUMPS = CACHE / "dumps"
 TEXT_DIR = CACHE / "pdf_text"
 BRIEF_DIR = CACHE / "agent_briefs"
