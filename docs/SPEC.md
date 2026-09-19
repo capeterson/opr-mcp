@@ -16,7 +16,12 @@ A local MCP server that indexes user-supplied One Page Rules (OPR) PDFs and expo
 ### Non-Goals (v1)
 - Scraping, fetching, or auto-updating from the OPR website.
 - Multi-user / multi-tenant deployment.
-- A list-builder or points calculator.
+- An *interactive* list-builder or points calculator (roster editing).
+  Read-only [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
+  views — army/unit browsing, rules search, a force-org reference — were
+  added on top of the existing tools; see README.md's "Interactive views"
+  section. They render alongside, not instead of, each tool's JSON/text
+  result, and don't build or validate a roster.
 - Image/diagram extraction (we extract text from PDFs only; if a unit card has a stat table rendered as an image, it'll need OCR — flagged as a known limitation, not a v1 deliverable).
 
 ---

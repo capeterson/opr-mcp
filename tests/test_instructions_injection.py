@@ -51,6 +51,8 @@ from opr_mcp.server import (
 )
 from opr_mcp.server.instructions import _INSTRUCTIONS_RESOURCE_URI
 
+from .conftest import model_payload
+
 
 class _FakeSession:
     """Stand-in for mcp.server.session.ServerSession.
@@ -324,7 +326,7 @@ def test_force_org_guidance_marks_session_acknowledged():
     server._tool_manager._tools["list_armies"].fn(ctx=ctx)
     # Now acknowledge.
     server._tool_manager._tools["force_org_guidance"].fn(ctx=ctx)
-    out = server._tool_manager._tools["list_armies"].fn(ctx=ctx)
+    out = model_payload(server._tool_manager._tools["list_armies"].fn(ctx=ctx))
     assert "force_org_warning" not in out
 
 
@@ -336,7 +338,7 @@ def test_validate_army_list_marks_session_acknowledged():
     server._tool_manager._tools["validate_army_list"].fn(
         game_size_pts=750, units=[], ctx=ctx
     )
-    out = server._tool_manager._tools["list_armies"].fn(ctx=ctx)
+    out = model_payload(server._tool_manager._tools["list_armies"].fn(ctx=ctx))
     assert "force_org_warning" not in out
 
 
@@ -349,7 +351,7 @@ def test_force_org_summary_nested_in_list_armies_payload():
     indexing_status.mark_initial_completed()
     server = build_server()
     ctx = _fake_ctx()
-    out = server._tool_manager._tools["list_armies"].fn(ctx=ctx)
+    out = model_payload(server._tool_manager._tools["list_armies"].fn(ctx=ctx))
     assert out["force_org_summary"]["rules"] == _FORCE_ORG_SUMMARY
     assert out["force_org_summary"]["see_also"] == "force_org_guidance"
 
@@ -378,7 +380,7 @@ def test_tool_signatures_accept_ctx_kwarg():
         server = build_server()
         ctx = _fake_ctx()
         tool = server._tool_manager._tools[name]
-        out = tool.fn(ctx=ctx)
+        out = model_payload(tool.fn(ctx=ctx))
         # Bare payloads in this idle/empty state would be lists or dicts;
         # the injection wrapper guarantees a dict with `instructions`.
         assert isinstance(out, dict), f"{name} returned {type(out)}"
@@ -404,7 +406,7 @@ def test_force_org_guidance_tool_returns_full_text_with_no_envelope():
     """
     server = build_server()
     ctx = _fake_ctx()
-    out = server._tool_manager._tools["force_org_guidance"].fn(ctx=ctx)
+    out = model_payload(server._tool_manager._tools["force_org_guidance"].fn(ctx=ctx))
     assert isinstance(out, str)
     assert out == load_instructions_text()
 
@@ -525,5 +527,5 @@ def test_embedded_summary_uses_override_pointer_when_INSTRUCTIONS_FILE_set(
     indexing_status.mark_initial_completed()
     server = build_server()
     ctx = _fake_ctx()
-    out = server._tool_manager._tools["list_armies"].fn(ctx=ctx)
+    out = model_payload(server._tool_manager._tools["list_armies"].fn(ctx=ctx))
     assert out["force_org_summary"]["rules"] == _FORCE_ORG_SUMMARY_OVERRIDE_POINTER

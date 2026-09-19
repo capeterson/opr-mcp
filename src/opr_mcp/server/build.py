@@ -35,6 +35,7 @@ from .context import ServerContext, SessionTracker
 from .force_org import handshake_instructions
 from .instructions import load_instructions_text
 from .tools import register_tools
+from .ui import register_ui_resources
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +110,7 @@ def build_server(*, with_auth: AuthConfig | None = None) -> FastMCP:
         instructions_text=load_instructions_text(),
     )
     register_tools(mcp_obj, srv)
+    register_ui_resources(mcp_obj)
     if with_auth is not None:
         register_discord_callback(mcp_obj, srv)
     return mcp_obj

@@ -1,0 +1,11 @@
+{
+  "view": "rule",
+  "name": "Tough",
+  "rule": {
+    "name": "Tough",
+    "parametric": true,
+    "scope": "core",
+    "description": "This model has extra hit points equal to the value in brackets. Remove one hit point per wound suffered instead of removing the model, unless it runs out of hit points.",
+    "source": { "filename": "grimdark-future-core.pdf", "page": 5, "version": "3.5.3" }
+  }
+}
