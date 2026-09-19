@@ -1,0 +1,27 @@
+{
+  "view": "unit",
+  "units": [
+    {
+      "army": "High Elves",
+      "name": "Spearmen",
+      "qty": 10,
+      "quality": "4+",
+      "defense": "4+",
+      "base_points": 80,
+      "equipment": ["Spear"],
+      "rules": [
+        { "name": "Shield Wall", "description": "This model gets +1 to Defense rolls while in base contact with another friendly model with this rule." }
+      ],
+      "upgrade_groups": [
+        {
+          "kind": "Upgrade",
+          "options": [
+            { "text": "Musician", "points_cost": 5 },
+            { "text": "Standard Bearer", "points_cost": 10 }
+          ]
+        }
+      ],
+      "source": { "filename": "aof-high-elves.pdf", "page": 12, "version": "3.5.3", "game_system": "aof" }
+    }
+  ]
+}

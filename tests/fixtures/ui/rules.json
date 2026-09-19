@@ -1,0 +1,13 @@
+{
+  "view": "search",
+  "query": "how does tough work",
+  "hits": [
+    {
+      "section_title": "Tough",
+      "section_type": "rule",
+      "source": { "filename": "grimdark-future-core.pdf", "army": null, "game_system": "core", "page": 5 },
+      "text": "This model has extra hit points equal to the value in brackets. Remove one hit point per wound suffered instead of removing the model, unless it runs out of hit points.",
+      "score": 0.923456
+    }
+  ]
+}

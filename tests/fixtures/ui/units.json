@@ -1,0 +1,10 @@
+{
+  "view": "units",
+  "army": "High Elves",
+  "game_system": "aof",
+  "units": [
+    { "name": "Spearmen", "base_points": 80, "qty": 10, "quality": "4+", "defense": "4+" },
+    { "name": "Silver Helms", "base_points": 140, "qty": 5, "quality": "3+", "defense": "3+" },
+    { "name": "Mage", "base_points": 65, "qty": 1, "quality": "4+", "defense": "5+" }
+  ]
+}

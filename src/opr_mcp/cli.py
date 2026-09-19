@@ -288,6 +288,62 @@ def cleanup_cmd(
         raise typer.Exit(code=1)
 
 
+_DEFAULT_UI_FIXTURES = {
+    "browser": "armies.json",
+    "rules": "rules.json",
+    "force-org": None,
+}
+
+
+@app.command(name="ui-preview")
+def ui_preview(
+    view: str = typer.Argument(..., help="View name: browser, rules, or force-org."),
+    out: Path = typer.Option(Path("preview.html"), "--out", help="Where to write the rendered HTML."),
+    fixture: Path | None = typer.Option(
+        None, "--fixture",
+        help="JSON file used as the view's structuredContent. Defaults to "
+             "tests/fixtures/ui/<view's default>.json when omitted.",
+    ),
+) -> None:
+    """Render a ``ui://`` view to a standalone HTML file for a browser.
+
+    No MCP-Apps-capable host is required: the page stubs out
+    ``callServerTool`` / ``updateModelContext`` and feeds it the fixture
+    data directly, so it opens and renders like it would in a real host
+    for everything except live tool calls (e.g. clicking an army in the
+    ``browser`` view). This exists because Claude Code does not render
+    ``ui://`` resources (https://github.com/anthropics/claude-code/issues/95149)
+    -- use this to iterate on layout/theme/interaction without a
+    rendering host, then verify the real protocol against Claude
+    desktop/web before shipping.
+    """
+    import json
+
+    from .ui.render import render_preview
+    from .ui.views import VIEWS
+
+    if view not in VIEWS:
+        typer.echo(f"Unknown view {view!r}. Choices: {', '.join(sorted(VIEWS))}")
+        raise typer.Exit(code=1)
+
+    fixture_path = fixture
+    if fixture_path is None:
+        default_name = _DEFAULT_UI_FIXTURES.get(view)
+        if default_name is not None:
+            candidate = Path("tests/fixtures/ui") / default_name
+            if candidate.exists():
+                fixture_path = candidate
+
+    data: dict = {}
+    if fixture_path is not None:
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+    else:
+        typer.echo("(no fixture found -- rendering with empty structuredContent)")
+
+    out.write_text(render_preview(view, data), encoding="utf-8")
+    typer.echo(f"Wrote {out}")
+
+
 def _print_summary(stats: IngestStats) -> None:
     typer.echo(
         f"Ingest summary: {stats.documents} docs, {stats.skipped} skipped, "

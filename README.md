@@ -119,6 +119,9 @@ Tools exposed:
 | `list_documents()` | All ingested PDFs |
 | `index_status()` | Whether ingest is currently running and whether the initial sweep has completed |
 
+Six of these also render an interactive view on hosts that support MCP Apps
+— see [Interactive views](#interactive-views) below.
+
 `lookup_unit` is the right tool for any "how much does upgrade X cost"
 question — its `upgrade_groups` field gives exact (option text, points)
 pairs parsed from the structured upgrade table. Point costs vary across
@@ -165,6 +168,32 @@ where a dedicated guidance tool would never be visible to the model.
 
 Override the guidance by editing the bundled file or by setting
 `INSTRUCTIONS_FILE`.
+
+## Interactive views
+
+Six tools also render an interactive view via [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
+(SEP-1865, the official extension mcp-ui itself now builds on):
+
+| Tool(s) | View | Shows |
+|---|---|---|
+| `list_armies`, `list_units`, `lookup_unit` | Army & Unit Browser | Army list with a game-system toggle, drilling into a roster and then a full unit card — navigable in place, only the first click needs a tool call |
+| `search_rules`, `get_special_rule` | Rules Search | Expandable result cards with source/page/score, and a "Cite this" button that pushes the passage into the model's context |
+| `force_org_guidance` | Force-Org Reference | The four force-org limits recomputed live as you drag a game-size slider |
+
+Every one of these tools still returns its full JSON (or, for
+`force_org_guidance`, markdown) result exactly as before — the view is
+additive, delivered via `structuredContent` and a `ui://` resource
+referenced from the tool's `_meta`. Not every MCP host renders these
+today; notably, **Claude Code does not**
+([anthropics/claude-code#95149](https://github.com/anthropics/claude-code/issues/95149)) —
+it shows the same text result as before. They do render in Claude
+desktop/web/mobile, VS Code, Goose, and Postman.
+
+To iterate on a view without a rendering host, use
+`opr-mcp ui-preview <browser|rules|force-org> --out preview.html` and open
+the file in a browser — it stubs out server-tool calls and feeds the view a
+JSON fixture (defaults to one under `tests/fixtures/ui/`, or pass `--fixture`)
+as if a host had just delivered a tool result.
 
 ## Configuration
 
@@ -344,5 +373,7 @@ Tests stub out the real embedding model so they run offline.
 
 ## Out of scope
 
-Scraping or auto-update from the OPR website, list-builder / points calculator,
-multi-user deployment, web UI. See [`docs/SPEC.md`](docs/SPEC.md) §11 for v2 ideas.
+Scraping or auto-update from the OPR website, interactive list-builder /
+points calculator (the [Interactive views](#interactive-views) are read-only
+plus rules citation, not roster editing), multi-user deployment. See
+[`docs/SPEC.md`](docs/SPEC.md) §11 for v2 ideas.

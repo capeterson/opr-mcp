@@ -19,6 +19,8 @@ The package is split into focused submodules:
     warning sibling fields to a tool response.
   * ``tools``         — MCP tool registration (one closure per tool over
     the ``ServerContext``).
+  * ``ui``            — MCP Apps (``ui://``) resource registration and
+    the ``ui_result`` helper that attaches a view to a tool response.
   * ``auth_callback`` — Discord OAuth callback route.
   * ``build``         — ``build_server`` factory + the default
     module-level ``mcp`` stdio server + ``main`` entry point.
@@ -45,6 +47,7 @@ from .instructions import (
     _INSTRUCTIONS_RESOURCE_URI,
     load_instructions_text,
 )
+from .ui import register_ui_resources, ui_result, view_meta
 
 # Back-compat aliases for tests / external callers that imported the
 # private names from the pre-split ``opr_mcp.server`` module. New code
@@ -78,6 +81,9 @@ __all__ = [
     "load_instructions_text",
     "main",
     "mcp",
+    "register_ui_resources",
     "short_summary",
+    "ui_result",
+    "view_meta",
     "with_status",
 ]

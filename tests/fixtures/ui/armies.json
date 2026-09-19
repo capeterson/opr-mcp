@@ -1,0 +1,8 @@
+{
+  "view": "armies",
+  "armies": [
+    { "army": "High Elves", "game_system": "aof", "document_count": 1, "unit_count": 3 },
+    { "army": "High Elves", "game_system": "aofs", "document_count": 1, "unit_count": 2 },
+    { "army": "Orc Marauders", "game_system": "gf", "document_count": 1, "unit_count": 2 }
+  ]
+}

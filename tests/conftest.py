@@ -7,12 +7,14 @@ of the input — stable across runs but obviously not semantically meaningful.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from mcp import types
 
 # Force a stable, in-process model name so the import-time cache key is stable.
 os.environ.setdefault("EMBED_MODEL", "stub")
@@ -22,6 +24,26 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from opr_mcp import embeddings as _emb  # noqa: E402
 from opr_mcp.config import EMBED_DIM  # noqa: E402
+
+
+def model_payload(result):
+    """Unwrap a tool's model-facing payload, whether or not it went
+    through ``ui_result``.
+
+    Tools that attach an MCP Apps view (see ``opr_mcp.server.ui``)
+    return a ``types.CallToolResult`` whose ``content[0].text`` carries
+    the same JSON (or markdown, for ``force_org_guidance``) the tool
+    used to return directly. Tests written against the pre-UI return
+    shape stay valid by unwrapping through this helper instead of
+    asserting on ``tool.fn()``'s return value directly.
+    """
+    if isinstance(result, types.CallToolResult):
+        text = result.content[0].text
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text  # e.g. force_org_guidance's markdown body
+    return result
 
 
 def _stub_encode(texts, batch_size: int = 32) -> np.ndarray:

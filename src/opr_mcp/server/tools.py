@@ -30,10 +30,11 @@ from .context import ServerContext
 from .finalize import finalize
 from .force_org import embed_force_org_summary
 from .instructions import _INSTRUCTIONS_RESOURCE_URI
+from .ui import ui_result, view_meta
 
 
 def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
-    @mcp_obj.tool()
+    @mcp_obj.tool(meta=view_meta("rules"))
     def search_rules(
         query: str,
         limit: int = 10,
@@ -65,16 +66,16 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
             version: Optional version pin (e.g. "3.5.3"). When omitted, only
                 the latest version of each (game_system, army) book is searched.
         """
-        return finalize(
-            search_rules_tool.run(
-                srv.db(), query, limit=limit,
-                game_system=game_system, army=army, version=version,
-            ),
-            ctx,
-            srv=srv,
+        hits = search_rules_tool.run(
+            srv.db(), query, limit=limit,
+            game_system=game_system, army=army, version=version,
+        )
+        return ui_result(
+            finalize(hits, ctx, srv=srv),
+            data={"view": "search", "query": query, "hits": hits},
         )
 
-    @mcp_obj.tool()
+    @mcp_obj.tool(meta=view_meta("browser"))
     def lookup_unit(
         name: str,
         army: str | None = None,
@@ -124,22 +125,20 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
                 strings — eliminating the need to call ``get_special_rule``
                 per rule. Default false to keep the response small.
         """
-        return finalize(
-            embed_force_org_summary(
-                lookup_unit_tool.run(
-                    srv.db(),
-                    name,
-                    army=army,
-                    game_system=game_system,
-                    version=version,
-                    include_rule_text=include_rule_text,
-                )
-            ),
-            ctx,
-            srv=srv,
+        units = lookup_unit_tool.run(
+            srv.db(),
+            name,
+            army=army,
+            game_system=game_system,
+            version=version,
+            include_rule_text=include_rule_text,
+        )
+        return ui_result(
+            finalize(embed_force_org_summary(units), ctx, srv=srv),
+            data={"view": "unit", "units": units},
         )
 
-    @mcp_obj.tool()
+    @mcp_obj.tool(meta=view_meta("rules"))
     def get_special_rule(
         name: str,
         scope: str | None = None,
@@ -165,16 +164,16 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
             version: Optional version pin. When omitted, only the latest version
                 of each (game_system, army) source is searched.
         """
-        return finalize(
-            get_special_rule_tool.run(
-                srv.db(), name,
-                scope=scope, game_system=game_system, version=version,
-            ),
-            ctx,
-            srv=srv,
+        rule = get_special_rule_tool.run(
+            srv.db(), name,
+            scope=scope, game_system=game_system, version=version,
+        )
+        return ui_result(
+            finalize(rule, ctx, srv=srv),
+            data={"view": "rule", "name": name, "rule": rule},
         )
 
-    @mcp_obj.tool()
+    @mcp_obj.tool(meta=view_meta("browser"))
     def list_armies(ctx: Context | None = None) -> Any:
         """FORCE ORG: For AoF or Grimdark Future army-building requests, call
         ``force_org_guidance`` first and ``validate_army_list`` before
@@ -183,13 +182,13 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
 
         List every army present in the index, with document and unit counts.
         """
-        return finalize(
-            embed_force_org_summary(lists_tool.list_armies(srv.db())),
-            ctx,
-            srv=srv,
+        armies = lists_tool.list_armies(srv.db())
+        return ui_result(
+            finalize(embed_force_org_summary(armies), ctx, srv=srv),
+            data={"view": "armies", "armies": armies},
         )
 
-    @mcp_obj.tool()
+    @mcp_obj.tool(meta=view_meta("browser"))
     def list_units(
         army: str,
         game_system: str | None = None,
@@ -227,19 +226,22 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
                 ``rules`` list is returned as ``{"name", "description"}``
                 dicts. Default false.
         """
-        return finalize(
-            embed_force_org_summary(
-                lists_tool.list_units(
-                    srv.db(),
-                    army,
-                    game_system=game_system,
-                    version=version,
-                    details=details,
-                    include_rule_text=include_rule_text,
-                )
-            ),
-            ctx,
-            srv=srv,
+        units = lists_tool.list_units(
+            srv.db(),
+            army,
+            game_system=game_system,
+            version=version,
+            details=details,
+            include_rule_text=include_rule_text,
+        )
+        return ui_result(
+            finalize(embed_force_org_summary(units), ctx, srv=srv),
+            data={
+                "view": "units",
+                "army": army,
+                "game_system": game_system,
+                "units": units,
+            },
         )
 
     @mcp_obj.tool()
@@ -265,8 +267,8 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
             out["warning"] = warning
         return finalize(out, ctx, srv=srv, kind="diagnostic")
 
-    @mcp_obj.tool()
-    def force_org_guidance(ctx: Context | None = None) -> str:
+    @mcp_obj.tool(meta=view_meta("force-org"))
+    def force_org_guidance(ctx: Context | None = None) -> Any:
         """Return the full force-organization guidance for OPR army building.
 
         Call this once per session BEFORE constructing or validating any
@@ -277,7 +279,7 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
         ``force_org_warning`` banner on subsequent tool responses.
         """
         srv.session_tracker.mark_acknowledged(ctx)
-        return srv.instructions_text
+        return ui_result(srv.instructions_text)
 
     @mcp_obj.tool()
     def validate_army_list(
