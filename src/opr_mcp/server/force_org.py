@@ -17,24 +17,45 @@ docstrings can't drift out of sync with the runtime digest.
 """
 from __future__ import annotations
 
+from .. import rulesets
 from ..config import instructions_file
 
-# Short, ~80-token digest of the four AoF/GF force-org rules.
-# Wording is verified only for AoF and GF (per ``instructions.md`` —
-# other game systems like Firefight, Skirmish, Quest, FTL may have
-# different formulas), so the scope claim is constrained accordingly.
-_FORCE_ORG_SUMMARY = (
-    "AoF / Grimdark Future force-org rules "
-    "(G = game size in pts; verified in both core rulebooks):\n"
-    "  1. HEROES         max floor(G/375) hero units\n"
-    "  2. DUPLICATES     max (1 + floor(G/750)) of the same unit "
-    "(combined units = 1)\n"
-    "  3. UNIT COST CAP  no single unit > 35% of G "
-    "(hero + attached unit = 1 unit)\n"
-    "  4. UNIT COUNT CAP max floor(G/150) units total\n"
-    "Call `force_org_guidance` for the full text and `validate_army_list` "
-    "before finalizing any list."
-)
+
+def summary_for(ruleset: rulesets.ForceOrgRuleset, *, edition: str | None = None) -> str:
+    """Render the short force-org digest from a versioned ruleset entry.
+
+    Wording is verified only for AoF and GF (per ``instructions.md`` —
+    other game systems like Firefight, Skirmish, Quest, FTL may have
+    different formulas), so the scope claim is constrained accordingly.
+    """
+    lim = ruleset.limits
+    scope = (
+        f"edition {edition}" if edition
+        else "verified in both core rulebooks"
+    )
+    return (
+        "AoF / Grimdark Future force-org rules "
+        f"(G = game size in pts; {scope}):\n"
+        f"  1. HEROES         max floor(G/{lim['hero_per_pts']}) hero units\n"
+        f"  2. DUPLICATES     max ({lim['dup_base']} + floor(G/{lim['dup_per_pts']})) "
+        "of the same unit (combined units = 1)\n"
+        f"  3. UNIT COST CAP  no single unit > {lim['max_unit_cost_pct']}% of G "
+        "(hero + attached unit = 1 unit)\n"
+        f"  4. UNIT COUNT CAP max floor(G/{lim['unit_per_pts']}) units total\n"
+        "Call `force_org_guidance` for the full text and `validate_army_list` "
+        "before finalizing any list."
+    )
+
+
+def _default_summary() -> str:
+    ruleset = rulesets.resolve_force_org(None, None)
+    assert ruleset is not None, "force_org.json must cover the default system"
+    return summary_for(ruleset)
+
+
+# Short, ~80-token digest of the four AoF/GF force-org rules under the
+# newest bundled ruleset entry (see ``rulesets/force_org.json``).
+_FORCE_ORG_SUMMARY = _default_summary()
 
 # Pointer used in place of ``_FORCE_ORG_SUMMARY`` when the operator has
 # overridden ``instructions.md`` via ``INSTRUCTIONS_FILE``. The hardcoded

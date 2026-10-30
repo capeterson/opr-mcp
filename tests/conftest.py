@@ -108,3 +108,18 @@ def tmp_auth_db(tmp_path, monkeypatch):
     # the host's user-data dir.
     monkeypatch.setenv("DB_PATH", str(tmp_path / "opr.db"))
     return p
+
+
+@pytest.fixture(autouse=True)
+def _offline_forge_history(monkeypatch):
+    """Keep forge-sync tests offline: ``sync`` now snapshots core rules via
+    ``api.fetch_common_rules`` after the pair loop. Tests that care about
+    the payload patch it themselves."""
+    from opr_mcp.forge import api as forge_api
+
+    monkeypatch.setattr(
+        forge_api, "fetch_common_rules",
+        lambda gid: {"rules": [], "traits": []},
+    )
+    # ``serve`` would otherwise download the published history bundle.
+    monkeypatch.setenv("HISTORY_SEED", "false")

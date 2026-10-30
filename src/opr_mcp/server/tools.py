@@ -20,15 +20,16 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .. import indexing_status
+from .. import indexing_status, rulesets
 from ..tools import get_special_rule as get_special_rule_tool
+from ..tools import history as history_tool
 from ..tools import lists as lists_tool
 from ..tools import lookup_unit as lookup_unit_tool
 from ..tools import search_rules as search_rules_tool
 from ..tools import validate_army_list as validate_army_list_tool
 from .context import ServerContext
 from .finalize import finalize
-from .force_org import embed_force_org_summary
+from .force_org import embed_force_org_summary, summary_for
 from .instructions import _INSTRUCTIONS_RESOURCE_URI
 from .ui import ui_result, view_meta
 
@@ -65,6 +66,9 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
             army: Optional army-name filter (case-sensitive).
             version: Optional version pin (e.g. "3.5.3"). When omitted, only
                 the latest version of each (game_system, army) book is searched.
+                The full-text index covers ingested PDFs only — older Forge
+                revisions are not searchable here; use ``diff_army`` /
+                ``diff_core_rules`` or ``lookup_unit(version=...)`` for those.
         """
         hits = search_rules_tool.run(
             srv.db(), query, limit=limit,
@@ -117,9 +121,12 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
                 (Warfleets FTL), and ``"core"`` (core rulebooks). Strongly
                 recommended for any cost question — point scales differ
                 across game systems.
-            version: Optional version pin (e.g. "3.5.3"). When omitted,
-                only the latest army-book version per (game_system, army)
-                contributes results.
+            version: Optional version ref: a version string ("3.5.3"),
+                "latest", "previous", an ISO date ("2026-09-01"), or a
+                snapshot id ("#12"). Older Forge revisions are served from
+                captured version history (rows tagged
+                ``version_source: "snapshot"``). When omitted, the latest
+                version is used.
             include_rule_text: When true, ``rules`` is returned as a list of
                 ``{"name", "description"}`` dicts instead of bare name
                 strings — eliminating the need to call ``get_special_rule``
@@ -161,8 +168,14 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
             name: Rule name, with or without "(X)" parameter (e.g. "Tough" or "Tough(3)").
             scope: Optional scope filter (e.g. "core" or "army:Custodian Brothers").
             game_system: Optional game-system filter.
-            version: Optional version pin. When omitted, only the latest version
-                of each (game_system, army) source is searched.
+            version: Optional version ref: a version string ("3.5.3"),
+                "latest", "previous", an ISO date ("2026-09-01"), or a
+                snapshot id ("#12"). Older Forge revisions are served from
+                captured version history (rows tagged
+                ``version_source: "snapshot"``). When omitted, the latest
+                version is used.
+                With a pinned version, army rules and core rules are read
+                from that version's snapshots.
         """
         rule = get_special_rule_tool.run(
             srv.db(), name,
@@ -174,15 +187,28 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
         )
 
     @mcp_obj.tool(meta=view_meta("browser"))
-    def list_armies(ctx: Context | None = None) -> Any:
+    def list_armies(
+        game_system: str | None = None,
+        version: str | None = None,
+        ctx: Context | None = None,
+    ) -> Any:
         """FORCE ORG: For AoF or Grimdark Future army-building requests, call
         ``force_org_guidance`` first and ``validate_army_list`` before
         finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
         are not covered by these rules.
 
-        List every army present in the index, with document and unit counts.
+        List every army present in the index, with document and unit counts
+        and the ``versions`` captured in version history.
+
+        Args:
+            game_system: Optional game-system filter (e.g. "gf", "aof").
+            version: Optional version ref (version string, "latest",
+                "previous", ISO date, or "#<snapshot id>"); keeps only
+                armies that have that version.
         """
-        armies = lists_tool.list_armies(srv.db())
+        armies = lists_tool.list_armies(
+            srv.db(), game_system=game_system, version=version,
+        )
         return ui_result(
             finalize(embed_force_org_summary(armies), ctx, srv=srv),
             data={"view": "armies", "armies": armies},
@@ -218,8 +244,12 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
                 with ``details=True`` for armies that appear in multiple
                 systems (e.g. AoF vs AoF Skirmish) — point scales differ,
                 so without the filter the roster mixes them.
-            version: Optional version pin. When omitted, only units from the
-                latest army-book version are returned.
+            version: Optional version ref: a version string ("3.5.3"),
+                "latest", "previous", an ISO date ("2026-09-01"), or a
+                snapshot id ("#12"). Older Forge revisions are served from
+                captured version history (rows tagged
+                ``version_source: "snapshot"``). When omitted, the latest
+                version is used.
             details: When true, return full unit cards (same shape as
                 ``lookup_unit``) instead of the lightweight roster.
             include_rule_text: When true (and ``details=True``), each unit's
@@ -245,8 +275,113 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
         )
 
     @mcp_obj.tool()
+    def list_versions(
+        army: str,
+        game_system: str | None = None,
+        ctx: Context | None = None,
+    ) -> Any:
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
+
+        List the captured versions of an army book, newest first.
+
+        Army Forge only serves the current revision of each book; this
+        server snapshots every distinct revision it syncs (plus any seeded
+        history). Use the returned ``version`` / ``snapshot_id`` values as
+        ``from_version`` / ``to_version`` for ``diff_army`` or as
+        ``version`` for ``lookup_unit`` / ``list_units``.
+
+        Args:
+            army: Army name (case-insensitive) or Forge book uid.
+            game_system: Optional game-system slug (e.g. "gf", "aof").
+        """
+        return finalize(
+            history_tool.list_versions(srv.db(), army, game_system=game_system),
+            ctx, srv=srv,
+        )
+
+    @mcp_obj.tool()
+    def diff_army(
+        army: str,
+        game_system: str,
+        from_version: str | None = None,
+        to_version: str | None = None,
+        unit: str | None = None,
+        sections: list[str] | None = None,
+        ctx: Context | None = None,
+    ) -> Any:
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
+
+        Show what changed in an army book between two versions.
+
+        Use for "what changed in X?" questions: unit stats / costs /
+        weapons / rules, upgrade option costs per unit, army special rules,
+        and spells. Defaults to the previous captured version vs the latest.
+
+        Args:
+            army: Army name (case-insensitive) or Forge book uid.
+            game_system: Game-system slug (e.g. "gf", "aof") — costs differ
+                per system, so this is required.
+            from_version: Version ref for the older side (default
+                "previous"): version string, "latest", "previous", ISO
+                date, or "#<snapshot id>".
+            to_version: Version ref for the newer side (default latest).
+            unit: Optional unit-name substring to diff a single unit.
+            sections: Optional subset of "units", "upgrades",
+                "special_rules", "spells".
+        """
+        return finalize(
+            history_tool.diff_army(
+                srv.db(), army, game_system=game_system,
+                from_version=from_version, to_version=to_version,
+                unit=unit, sections=sections,
+            ),
+            ctx, srv=srv,
+        )
+
+    @mcp_obj.tool()
+    def diff_core_rules(
+        game_system: str,
+        from_version: str | None = None,
+        to_version: str | None = None,
+        rule: str | None = None,
+        ctx: Context | None = None,
+    ) -> Any:
+        """FORCE ORG: For AoF or Grimdark Future army-building requests, call
+        ``force_org_guidance`` first and ``validate_army_list`` before
+        finalizing. Other game systems (Firefight, Skirmish, Quest, FTL)
+        are not covered by these rules.
+
+        Show what changed in a game system's core rules and traits between
+        two captured snapshots (default previous vs latest).
+
+        Args:
+            game_system: Game-system slug (e.g. "gf", "aof").
+            from_version: Older side ref (default "previous"): edition
+                string (e.g. "3.5.0"), "latest", "previous", ISO date, or
+                "#<snapshot id>".
+            to_version: Newer side ref (default latest).
+            rule: Optional rule-name substring to narrow the output.
+        """
+        return finalize(
+            history_tool.diff_core_rules(
+                srv.db(), game_system,
+                from_ref=from_version, to_ref=to_version, rule=rule,
+            ),
+            ctx, srv=srv,
+        )
+
+    @mcp_obj.tool()
     def list_documents(ctx: Context | None = None) -> Any:
-        """List every ingested PDF with its detected metadata."""
+        """List every ingested document with its detected metadata.
+
+        Not version-scoped: this reports the server's current index (use
+        ``list_versions`` for an army's version history)."""
         return finalize(lists_tool.list_documents(srv.db()), ctx, srv=srv)
 
     @mcp_obj.tool()
@@ -258,7 +393,7 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
         Tool responses themselves attach an ``indexing`` block with the
         same fields whenever indexing is not idle, so polling this tool
         is only needed when callers want the status without running a
-        query.
+        query. Not version-scoped (it describes the running server).
         """
         snap = indexing_status.snapshot()
         out = snap.to_dict()
@@ -268,7 +403,11 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
         return finalize(out, ctx, srv=srv, kind="diagnostic")
 
     @mcp_obj.tool(meta=view_meta("force-org"))
-    def force_org_guidance(ctx: Context | None = None) -> Any:
+    def force_org_guidance(
+        game_system: str | None = None,
+        edition: str | None = None,
+        ctx: Context | None = None,
+    ) -> Any:
         """Return the full force-organization guidance for OPR army building.
 
         Call this once per session BEFORE constructing or validating any
@@ -277,14 +416,41 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
         and the mandatory pre-finalization checklist. Calling this tool
         also acknowledges the guidance for the session, silencing the
         ``force_org_warning`` banner on subsequent tool responses.
+
+        Args:
+            game_system: Optional game-system slug ("aof" / "gf").
+            edition: Optional rules edition (e.g. "3.5.0"). When given
+                with or without ``game_system``, the response is prefixed
+                with the force-org limits versioned for that edition.
         """
         srv.session_tracker.mark_acknowledged(ctx)
-        return ui_result(srv.instructions_text)
+        text = srv.instructions_text
+        if game_system is not None or edition is not None:
+            ruleset = rulesets.resolve_force_org(game_system, edition)
+            if ruleset is None:
+                header = (
+                    f"No versioned force-org limits exist for "
+                    f"{game_system!r}; apply that game system's core-rulebook "
+                    "army-building limits.\n\n"
+                )
+            else:
+                header = (
+                    summary_for(ruleset, edition=edition)
+                    + f"\n(ruleset {ruleset.edition_min}+, "
+                    f"confidence: {ruleset.confidence}; source: {ruleset.source})"
+                    "\n\n"
+                )
+            text = header + text
+        return ui_result(text)
 
     @mcp_obj.tool()
     def validate_army_list(
         game_size_pts: int,
         units: list[dict],
+        army: str | None = None,
+        game_system: str | None = None,
+        version: str | None = None,
+        edition: str | None = None,
         ctx: Context | None = None,
     ) -> dict:
         """Check a proposed AoF / Grimdark Future army list against the
@@ -314,10 +480,34 @@ def register_tools(mcp_obj: FastMCP, srv: ServerContext) -> None:
                 ``attached_hero_name`` is set), ``attached_hero_tough``
                 (int | None; for the Tough(6) attachment-eligibility
                 check), and ``is_hero`` (bool, default False; True for
-                stand-alone hero entries).
+                stand-alone hero entries). Optional: ``upgrades`` /
+                ``attached_hero_upgrades`` (list of exact option texts, so
+                the server can recompute points), and ``army`` (when an
+                entry comes from a different army book).
+            army: Optional army name. With ``game_system``, the server
+                re-derives each entry's points (base + ``upgrades``),
+                hero status, Tough, and model count from the army data at
+                ``version``, and reports ``DATA_*`` check failures.
+            game_system: Optional game-system slug ("aof", "gf", ...).
+                Selects the versioned force-org ruleset; systems without
+                one get client checks instead of limit checks.
+            version: Optional army version ref (version string, "latest",
+                "previous", ISO date, "#<snapshot id>"). Also picks the
+                rules edition and the core ``Hero`` rule in force then.
+            edition: Optional explicit rules edition, overriding the one
+                derived from ``version``.
+
+        Returns ``passed`` (every server-side check ok), ``client_checks``
+        (rules the server could not fully verify, with rule text for that
+        version — work through each one before finalizing), and
+        ``fully_verified`` (passed AND no client checks), plus a
+        ``ruleset`` block naming the edition and sources used.
         """
         srv.session_tracker.mark_acknowledged(ctx)
-        return validate_army_list_tool.run(game_size_pts, units)
+        return validate_army_list_tool.run(
+            game_size_pts, units, conn=srv.db(),
+            army=army, game_system=game_system, version=version, edition=edition,
+        )
 
     @mcp_obj.resource(_INSTRUCTIONS_RESOURCE_URI, mime_type="text/markdown")
     def force_org_guidance_resource() -> str:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from ..history import store as history_store
+from ..history import views as history_views
 from . import filtered_document_ids, strip_param
 
 
@@ -13,10 +15,36 @@ def run(
     game_system: str | None = None,
     version: str | None = None,
 ) -> dict | None:
+    """Look up one rule. With a non-live ``version`` (shared ref grammar),
+    PDF rules at that version string win; otherwise the rule is resolved
+    from the versioned army-book / core-rules snapshots."""
     bare = strip_param(name)
     if not bare:
         return None
+    if version is not None and not history_store.is_live_ref(version):
+        ref = history_store.parse_ref(version)
+        hit = (
+            _live_lookup(conn, bare, scope=scope, game_system=game_system,
+                         version=str(ref.value))
+            if ref.kind == "version" else None
+        )
+        if hit is not None:
+            hit["version_source"] = "live"
+            return hit
+        return history_views.find_rule(
+            conn, name, version=version, game_system=game_system, scope=scope,
+        )
+    return _live_lookup(conn, bare, scope=scope, game_system=game_system, version=None)
 
+
+def _live_lookup(
+    conn: sqlite3.Connection,
+    bare: str,
+    *,
+    scope: str | None,
+    game_system: str | None,
+    version: str | None,
+) -> dict | None:
     doc_ids = filtered_document_ids(
         conn, game_system=game_system, version=version,
     )

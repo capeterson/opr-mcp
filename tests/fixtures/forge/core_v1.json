@@ -1,0 +1,31 @@
+{
+ "rules": [
+  {
+   "id": "c-hero",
+   "name": "Hero",
+   "description": "Heroes with up to Tough(6) may deploy as part of one multi-model unit without another Hero, but must use the unit's Defense until all other models have been killed."
+  },
+  {
+   "id": "c-tough",
+   "name": "Tough",
+   "description": "This model must take X wounds before being killed."
+  },
+  {
+   "id": "c-fearless",
+   "name": "Fearless",
+   "description": "Gets +1 to morale test rolls."
+  },
+  {
+   "id": "c-scout",
+   "name": "Scout",
+   "description": "May be deployed after all other units."
+  }
+ ],
+ "traits": [
+  {
+   "id": "t1",
+   "name": "Leader",
+   "description": "The Hero and its unit get +1 to Morale Test rolls in melee."
+  }
+ ]
+}

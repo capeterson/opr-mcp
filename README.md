@@ -82,6 +82,57 @@ fresh JSON detail fetch.
 See the [Configuration](#configuration) section for all `FORGE_*` env
 vars (interval, filters, scope, rate limit).
 
+## Version history & diffs
+
+Army Forge only ever serves the **current** revision of each army book —
+there is no history endpoint, and version query parameters are ignored —
+so opr-mcp captures history itself:
+
+- Every Forge scan stores a normalized, compressed snapshot of each fetched
+  book (`book_snapshots`) and of each game system's core rules
+  (`/api/rules/common/{gs}` → `core_rule_snapshots`). Snapshots are
+  deduplicated by content hash, so Forge's catalog-wide `modifiedAt`
+  re-stamps and per-request id churn never create phantom versions.
+- History is append-only and is never touched by the retention sweeper.
+- New installs are seeded from a published bundle: with `FORGE_SYNC` and
+  `HISTORY_SEED` on (both default), `serve` downloads `HISTORY_SEED_URL`
+  in the background and imports it (idempotent, hash-verified, skipped
+  when unchanged). The bundle is the `history-latest` release asset,
+  refreshed weekly by `.github/workflows/history.yml`.
+
+**History starts at first capture.** Older editions can't be fetched
+retroactively, so the first diffs appear after the next errata or edition.
+
+MCP tools: `list_versions`, `diff_army` (units, per-unit upgrade costs,
+army special rules, spells; optional `unit` filter), and `diff_core_rules`.
+`lookup_unit`, `list_units`, `list_armies`, `get_special_rule`,
+`validate_army_list` and `force_org_guidance` all accept a version: a
+version string (`3.5.0`), `latest`, `previous`, an ISO date, or
+`#<snapshot id>`. Older revisions are served from history with
+`version_source: "snapshot"`.
+
+```bash
+uv run opr-mcp history list "Alien Hives" --game gf
+uv run opr-mcp history diff "Alien Hives" --game gf --from previous --unit "Hive Lord"
+uv run opr-mcp history export --out opr-history.ndjson.gz
+uv run opr-mcp history import opr-history.ndjson.gz   # path or URL
+```
+
+### Versioned validation
+
+`validate_army_list` picks the force-org limits for the edition in play
+from `src/opr_mcp/rulesets/force_org.json` (no Forge endpoint carries
+them), reads the hero-attachment limit from the versioned core **Hero**
+rule, and — given `army` + `game_system` — re-derives each entry's points
+(base + listed `upgrades`), hero status, Tough and model count from the
+army data at that version. Rules it can't verify server-side (free-text
+upgrade limits, list-building army rules, mixed books, unsupported game
+systems) come back as `client_checks` with the rule text for that version;
+`fully_verified` is only true when nothing is left for the client.
+
+**When a new core-rules edition ships**, check its force-org limits and
+update `rulesets/force_org.json` (widen `edition_max` or add an entry).
+
 ## PDF ingest
 
 `PDF_DIR` (default `/pdf`) is where you drop your own PDFs — typically the
@@ -242,11 +293,18 @@ Only relevant when running with `--transport http` or `AUTH_ENABLED=true`.
 | `FORGE_GAMES` | `gf,aof` | Comma-separated game-system slugs or numeric IDs. Use `all` to opt in to every known system (`ftl,gf,gff,aof,aofs,aofr,aofq,aofqai,gfsq,gfsqai`). The cleanup sweeper also honors this — content for systems out of scope is pruned. |
 | `FORGE_MIN_REQUEST_INTERVAL_SECONDS` | `3.0` | Minimum spacing between outbound Forge requests. The shared rate limiter applies to listing and detail fetch. |
 
+### Version history
+
+| Name | Default | Purpose |
+|---|---|---|
+| `HISTORY_SEED` | `true` | On `serve` (with `FORGE_SYNC`), import the published history bundle in the background. Set to `false` to rely only on locally captured history. |
+| `HISTORY_SEED_URL` | `https://github.com/capeterson/opr-mcp/releases/download/history-latest/opr-history.ndjson.gz` | Seed bundle location (any http(s) or `file://` URL). |
+
 ### Retention
 
 | Name | Default | Purpose |
 |---|---|---|
-| `CLEANUP_INTERVAL_SECONDS` | `86400` (24h) | How often the retention sweeper runs. Prunes Forge content that's out of `FORGE_GAMES` scope and trims old historical render versions. Only active when `FORGE_SYNC=true`. Minimum 60. |
+| `CLEANUP_INTERVAL_SECONDS` | `86400` (24h) | How often the retention sweeper runs. Prunes Forge content that's out of `FORGE_GAMES` scope. Version history (`book_snapshots` / `core_rule_snapshots`) is never pruned. Only active when `FORGE_SYNC=true`. Minimum 60. |
 
 ### Auth (Discord OAuth)
 
@@ -370,6 +428,10 @@ Tests stub out the real embedding model so they run offline.
   are not parsed; the Forge JSON path is the sole source of structured unit data.
   OCR is out of scope for v1.
 - **No reranker.** RRF over BM25 + vector is good enough at this corpus size.
+- **Version history starts at first capture.** Forge exposes no history, so
+  versions published before an install (or the weekly bundle job) first saw
+  them are unavailable. `search_rules` full-text search covers PDFs only, not
+  historical Forge revisions.
 
 ## Out of scope
 

@@ -11,7 +11,11 @@ Each scan:
    ``/api/army-books/{uid}?gameSystem={gs}`` for the structured units /
    upgradePackages payload that :mod:`opr_mcp.ingest.forge_book` writes
    into ``units`` and ``unit_upgrades``.
-3. Prunes ``forge_books`` rows (plus the synthetic ``documents`` row
+3. Records a version snapshot of every fetched detail payload, plus the
+   core rules for each in-scope game system (see :mod:`opr_mcp.history`).
+   Snapshots dedupe on content, so the catalog-wide ``modifiedAt``
+   re-stamps Forge does without real changes cost nothing.
+4. Prunes ``forge_books`` rows (plus the synthetic ``documents`` row
    that owns API-sourced units) that were in scope but didn't appear
    in this scan's listing.
 
@@ -36,7 +40,9 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field
 
+from ..history import store as history_store
 from ..ingest import forge_book
+from ..versioning import version_key
 from . import api
 
 log = logging.getLogger(__name__)
@@ -54,6 +60,8 @@ class SyncStats:
     unchanged: int = 0
     pruned: int = 0
     details_synced: int = 0
+    snapshots_recorded: int = 0
+    core_rule_snapshots: int = 0
     failed: list[tuple[str, str]] = field(default_factory=list)
 
 
@@ -195,16 +203,20 @@ def _latest_row(
 def _detail_needs_refresh(
     latest: sqlite3.Row | None,
     upstream_modified: str | None,
+    *,
+    has_snapshot: bool = True,
 ) -> bool:
     """Decide if a ``/api/army-books/{uid}`` detail fetch is needed.
 
     Triggers when there's no row yet, the latest row hasn't been
-    detail-synced, or its recorded ``detail_modified_at`` is older /
-    different from the listing's ``modifiedAt``.
+    detail-synced, its recorded ``detail_modified_at`` is older /
+    different from the listing's ``modifiedAt``, or the book has no
+    version snapshot yet (one-time backfill for DBs upgraded from
+    schema v4, whose live rows predate history capture).
     """
     if latest is None:
         return True
-    if not latest["detail_synced_at"]:
+    if not latest["detail_synced_at"] or not has_snapshot:
         return True
     stored = latest["detail_modified_at"]
     return not stored or not upstream_modified or stored != upstream_modified
@@ -290,7 +302,10 @@ def _process_pair(
 
     latest = _latest_row(conn, uid, gid)
     is_new = latest is None
-    detail_outdated = _detail_needs_refresh(latest, upstream_modified)
+    detail_outdated = _detail_needs_refresh(
+        latest, upstream_modified,
+        has_snapshot=history_store.has_book_snapshot(conn, uid, gid),
+    )
 
     if not detail_outdated:
         # latest is guaranteed non-None here: _detail_needs_refresh
@@ -345,6 +360,11 @@ def _process_pair(
                         detail_modified_at=upstream_modified,
                         now=now,
                     )
+                    recorded = history_store.record_book_snapshot(
+                        conn,
+                        book_meta=book, game_system=gid,
+                        detail=detail, captured_at=now,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     conn.execute("ROLLBACK TO SAVEPOINT forge_detail")
                     conn.execute("RELEASE SAVEPOINT forge_detail")
@@ -355,10 +375,45 @@ def _process_pair(
                 else:
                     conn.execute("RELEASE SAVEPOINT forge_detail")
                     stats.details_synced += 1
+                    if recorded:
+                        stats.snapshots_recorded += 1
 
     # Per-pair commit so concurrent readers see incremental progress and
     # we don't hold the write lock across the whole scan.
     conn.commit()
+
+
+def _snapshot_core_rules(
+    conn: sqlite3.Connection,
+    *,
+    pairs: list[tuple[dict, int]],
+    target_gs: set[int],
+    now: str,
+    stats: SyncStats,
+) -> None:
+    """Fetch ``/api/rules/common/{gs}`` per in-scope game system and record
+    a snapshot. The endpoint carries no version, so the snapshot's
+    ``edition`` is the highest ``versionString`` among this scan's books
+    for that system (the catalog moves editions in lockstep)."""
+    editions: dict[int, str] = {}
+    for book, gid in pairs:
+        v = book.get("versionString") or ""
+        if v and version_key(v) > version_key(editions.get(gid)):
+            editions[gid] = v
+    for gid in sorted(target_gs):
+        if gid not in editions:
+            continue  # no books in scope for this system this scan
+        try:
+            raw = api.fetch_common_rules(gid)
+            if history_store.record_core_rules_snapshot(
+                conn, game_system=gid, raw=raw, captured_at=now,
+                edition=editions.get(gid),
+            ):
+                stats.core_rule_snapshots += 1
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            stats.failed.append((f"core-rules gs={gid}", f"core-rules: {exc}"))
+            log.warning("forge: core rules snapshot failed for gs=%d: %s", gid, exc)
 
 
 def sync(
@@ -427,6 +482,9 @@ def sync(
                  f"process: {exc}"),
             )
 
+    if download:
+        _snapshot_core_rules(conn, pairs=pairs, target_gs=target_gs, now=now, stats=stats)
+
     # Prune only filters that actually returned books. If `FORGE_FILTERS`
     # is `official,community` and the community catalog transiently 500s back to
     # an empty list while official has data, we'd otherwise treat every
@@ -443,8 +501,10 @@ def sync(
     conn.commit()
     log.info(
         "forge: scan complete (new=%d unchanged=%d "
-        "details=%d pruned=%d failed=%d of %d pair(s))",
+        "details=%d snapshots=%d core-rule-snapshots=%d pruned=%d "
+        "failed=%d of %d pair(s))",
         stats.new, stats.unchanged,
-        stats.details_synced, stats.pruned, len(stats.failed), stats.seen,
+        stats.details_synced, stats.snapshots_recorded,
+        stats.core_rule_snapshots, stats.pruned, len(stats.failed), stats.seen,
     )
     return stats

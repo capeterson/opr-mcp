@@ -10,6 +10,11 @@ policy. A row of forge-mirrored content is kept only when *some* rule matches:
    regardless of rule 1 — this is how a config narrowing of ``FORGE_GAMES``
    eventually flushes the corresponding content.
 
+Version history (``book_snapshots`` / ``core_rule_snapshots``) is
+append-only and never touched by the sweeper. Rule 1 predates it and only
+matters for ``forge_books`` bookkeeping rows — live Forge units are
+single-version (one synthetic document per (uid, game_system)).
+
 Manually-dropped PDFs (anything in ``documents`` with no matching
 ``forge_books`` row) are never touched by the sweeper. They live until the
 user removes them from the watched directory or runs ``opr-mcp remove``.

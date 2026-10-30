@@ -65,7 +65,7 @@ def _fingerprint(
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
-def _format_stat(value: object) -> str | None:
+def format_stat(value: object) -> str | None:
     """Forge stores quality/defense as integers; the rest of the pipeline
     expects ``"3+"``-style strings (PDF banner format) so MCP clients
     don't have to special-case the source. ``None`` passes through for
@@ -80,7 +80,7 @@ def _format_stat(value: object) -> str | None:
     return s if s.endswith("+") else f"{s}+"
 
 
-def _option_cost_for_unit(option: dict, unit_id: str) -> int:
+def option_cost_for_unit(option: dict, unit_id: str) -> int:
     """Resolve the points cost of an upgrade ``option`` for a specific unit.
 
     The Forge payload stores a default ``cost`` plus an optional
@@ -104,7 +104,7 @@ def _option_cost_for_unit(option: dict, unit_id: str) -> int:
         return 0
 
 
-def _equipment_payload(weapons: list[dict] | None) -> str:
+def equipment_list(weapons: list[dict] | None) -> list[dict]:
     """Normalize ``unit.weapons[]`` for storage in ``units.equipment_json``.
 
     Keeps just the fields MCP consumers care about — name, label, range,
@@ -132,10 +132,10 @@ def _equipment_payload(weapons: list[dict] | None) -> str:
                 "specialRules": srs,
             }
         )
-    return json.dumps(out, ensure_ascii=False)
+    return out
 
 
-def _rules_payload(rules: list[dict] | None) -> str:
+def rules_list(rules: list[dict] | None) -> list[str]:
     """Convert ``unit.rules[]`` to the list-of-strings shape the MCP
     tools already handle.
 
@@ -152,10 +152,10 @@ def _rules_payload(rules: list[dict] | None) -> str:
                 out.append(str(label))
         elif isinstance(r, str) and r.strip():
             out.append(r.strip())
-    return json.dumps(out, ensure_ascii=False)
+    return out
 
 
-def _expand_upgrade_groups(
+def expand_upgrade_groups(
     detail: dict, unit: dict,
 ) -> list[tuple[str, list[tuple[str, int]]]]:
     """Materialize the unit's upgrade choices as ``(kind, [(text, cost)])``.
@@ -189,10 +189,33 @@ def _expand_upgrade_groups(
                 text = opt.get("label") or opt.get("name")
                 if not text:
                     continue
-                options.append((str(text), _option_cost_for_unit(opt, unit_id)))
+                options.append((str(text), option_cost_for_unit(opt, unit_id)))
             if options:
                 groups.append((str(label), options))
     return groups
+
+
+def unit_scalars(unit: object) -> tuple[str, int, int] | None:
+    """``(name, qty, base_points)`` for one ``units[]`` entry, or ``None``
+    when the entry is malformed or unnamed (those are skipped).
+
+    Shared by the live ingest below and the snapshot reader in
+    :mod:`opr_mcp.history.views` so both produce identical unit rows.
+    """
+    if not isinstance(unit, dict):
+        return None
+    name = unit.get("name") or unit.get("genericName")
+    if not name:
+        return None
+    try:
+        base_points = int(unit.get("cost") or 0)
+    except (TypeError, ValueError):
+        base_points = 0
+    try:
+        qty = int(unit.get("size") or 1)
+    except (TypeError, ValueError):
+        qty = 1
+    return str(name), qty, base_points
 
 
 def ingest_forge_book(
@@ -273,19 +296,10 @@ def ingest_forge_book(
     units_added = 0
     upgrades_added = 0
     for unit in detail.get("units") or []:
-        if not isinstance(unit, dict):
+        parsed = unit_scalars(unit)
+        if parsed is None:
             continue
-        name = unit.get("name") or unit.get("genericName")
-        if not name:
-            continue
-        try:
-            base_points = int(unit.get("cost") or 0)
-        except (TypeError, ValueError):
-            base_points = 0
-        try:
-            qty = int(unit.get("size") or 1)
-        except (TypeError, ValueError):
-            qty = 1
+        name, qty, base_points = parsed
 
         cur = conn.execute(
             """
@@ -295,18 +309,18 @@ def ingest_forge_book(
             VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, '', 'forge-api')
             """,
             (
-                doc_id, army_name, str(name), qty,
-                _format_stat(unit.get("quality")),
-                _format_stat(unit.get("defense")),
+                doc_id, army_name, name, qty,
+                format_stat(unit.get("quality")),
+                format_stat(unit.get("defense")),
                 base_points,
-                _equipment_payload(unit.get("weapons")),
-                _rules_payload(unit.get("rules")),
+                json.dumps(equipment_list(unit.get("weapons")), ensure_ascii=False),
+                json.dumps(rules_list(unit.get("rules")), ensure_ascii=False),
             ),
         )
         unit_row_id = int(cur.lastrowid)
         units_added += 1
 
-        for gi, (kind, options) in enumerate(_expand_upgrade_groups(detail, unit)):
+        for gi, (kind, options) in enumerate(expand_upgrade_groups(detail, unit)):
             for oi, (text, cost) in enumerate(options):
                 conn.execute(
                     """

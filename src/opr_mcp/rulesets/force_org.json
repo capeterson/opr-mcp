@@ -1,0 +1,18 @@
+{
+  "_comment": "Force-organization limits per game system and rules edition. Army Forge exposes no endpoint for these (they live only in the core rulebooks), so they are versioned here and reviewed by PR. When a new core-rules edition ships, verify the limits against its rulebook and either widen edition_max on the current entry or add a new one. Limits: heroes <= floor(G/hero_per_pts); copies of a unit <= dup_base + floor(G/dup_per_pts); any unit <= floor(max_unit_cost_pct*G/100); units <= floor(G/unit_per_pts).",
+  "force_org": [
+    {
+      "systems": ["aof", "gf"],
+      "edition_min": "3.0.0",
+      "edition_max": null,
+      "limits": {
+        "hero_per_pts": 375,
+        "dup_base": 1,
+        "dup_per_pts": 750,
+        "max_unit_cost_pct": 35,
+        "unit_per_pts": 150
+      },
+      "source": "Age of Fantasy / Grimdark Future core rulebooks v3.x, army-building section"
+    }
+  ]
+}

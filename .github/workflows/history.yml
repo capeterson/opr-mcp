@@ -1,0 +1,105 @@
+name: Version history
+
+# Army Forge only serves the current revision of each book, so history
+# has to be captured by us. Weekly, this job imports the previously
+# published bundle, runs a Forge scan (which snapshots every changed book
+# and the core rules), and republishes the bundle as the `history-latest`
+# release asset that `opr-mcp serve` seeds new installs from.
+
+on:
+  schedule:
+    - cron: "17 9 * * 1" # Mondays 09:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: history
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: history-latest
+  ASSET: opr-history.ndjson.gz
+  DB_PATH: ${{ github.workspace }}/history.db
+  # Cover every game system; the bundle is shared by all installs.
+  FORGE_GAMES: all
+  FORGE_FILTERS: official
+
+jobs:
+  capture:
+    name: Capture & publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Download previous bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prev
+          if gh release download "$RELEASE_TAG" --pattern "$ASSET" --dir prev; then
+            echo "Found previous bundle"
+          else
+            echo "No previous bundle (first run)"
+          fi
+
+      - name: Import previous bundle
+        run: |
+          if [ -f "prev/$ASSET" ]; then
+            uv run opr-mcp history import "prev/$ASSET"
+          fi
+
+      - name: Forge scan
+        # A partial scan (some books failed) still captured everything
+        # else; publish what we have and surface the failure as a warning.
+        run: |
+          if ! uv run opr-mcp forge-scan; then
+            echo "::warning::forge-scan reported failures; publishing partial capture"
+          fi
+
+      - name: Export bundle
+        run: uv run opr-mcp history export --out "$ASSET"
+
+      - name: Publish if changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Compare snapshot content, not bytes: the bundle header carries
+          # a created_at timestamp that changes every run.
+          content_sha() {
+            gzip -dc "$1" | tail -n +2 | python3 -c '
+          import hashlib, json, sys
+          h = hashlib.sha256()
+          for line in sys.stdin:
+              rec = json.loads(line)
+              h.update((rec["kind"] + rec["content_sha256"] + rec.get("uid", "")
+                        + str(rec["game_system"])).encode())
+          print(h.hexdigest())'
+          }
+          new_sha=$(content_sha "$ASSET")
+          old_sha=""
+          if [ -f "prev/$ASSET" ]; then old_sha=$(content_sha "prev/$ASSET"); fi
+          if [ "$new_sha" = "$old_sha" ]; then
+            echo "No new snapshots; leaving release untouched."
+            exit 0
+          fi
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "Version history (rolling)" \
+              --notes "Rolling OPR Army Forge version-history bundle. Imported automatically by \`opr-mcp serve\` (HISTORY_SEED)." \
+              --latest=false
+          fi
+          gh release upload "$RELEASE_TAG" "$ASSET" --clobber
