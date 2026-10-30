@@ -64,3 +64,21 @@ list with a caveat.
   team play), THEN use `search_rules` and read the FULL chunk,
   treating bullet lists ending without explanatory text as suspect
   and re-querying for a continuation.
+
+## Versions and client-side checks
+
+- The limits above are the v3.x AoF / GF values. `validate_army_list`
+  and `force_org_guidance` accept `game_system` / `edition` (and the
+  validator also `army` / `version`) and apply the limits for that
+  edition; trust the `ruleset` block in the response over this text.
+- Pass `army` + `game_system` (and each entry's exact `upgrades`) to
+  `validate_army_list` so it can re-derive points, hero status and Tough
+  from the army data instead of trusting your numbers.
+- `passed` covers server-side checks only. Before presenting a list,
+  work through EVERY entry in `client_checks` (rule text is included)
+  and state the outcome; only `fully_verified: true` means nothing is
+  left to check.
+- For "what changed" questions use `list_versions`, `diff_army` and
+  `diff_core_rules`. Version history only covers what this server has
+  captured (plus its seed bundle); say so if a version is missing.
+

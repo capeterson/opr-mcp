@@ -1,0 +1,172 @@
+{
+ "uid": "BOOK1",
+ "name": "Iron Legion",
+ "versionString": "3.6.0",
+ "modifiedAt": "2026-06-01T00:00:00.000Z",
+ "editedAt": "2026-05-30T00:00:00.000Z",
+ "official": true,
+ "factionName": null,
+ "popularity": 99,
+ "downvotes": 1,
+ "background": "Lore text.",
+ "coverImagePath": "covers/x.png",
+ "units": [
+  {
+   "id": "u-hero",
+   "name": "Battle Lord",
+   "cost": 95,
+   "size": 1,
+   "quality": 3,
+   "defense": 4,
+   "product": {
+    "imageUrls": [
+     "a.png"
+    ]
+   },
+   "weapons": [
+    {
+     "name": "Hand Weapon",
+     "label": "Hand Weapon (A3)",
+     "range": 0,
+     "attacks": 3,
+     "count": 1,
+     "specialRules": []
+    }
+   ],
+   "rules": [
+    {
+     "name": "Hero",
+     "label": "Hero"
+    },
+    {
+     "name": "Tough",
+     "label": "Tough(3)",
+     "rating": 3
+    },
+    {
+     "name": "Fearless",
+     "label": "Fearless"
+    }
+   ],
+   "upgrades": [
+    "P1"
+   ]
+  },
+  {
+   "id": "u-war",
+   "name": "Warriors",
+   "cost": 100,
+   "size": 10,
+   "quality": 3,
+   "defense": 5,
+   "weapons": [
+    {
+     "name": "Hand Weapon",
+     "label": "Hand Weapon (A1)",
+     "range": 0,
+     "attacks": 1,
+     "count": 10,
+     "specialRules": []
+    }
+   ],
+   "rules": [],
+   "upgrades": [
+    "P2"
+   ]
+  },
+  {
+   "id": "u-new",
+   "name": "Rangers",
+   "cost": 120,
+   "size": 5,
+   "quality": 4,
+   "defense": 5,
+   "weapons": [],
+   "rules": [
+    {
+     "name": "Scout",
+     "label": "Scout"
+    }
+   ],
+   "upgrades": []
+  }
+ ],
+ "upgradePackages": [
+  {
+   "uid": "P1",
+   "hint": "Battle Lord",
+   "sections": [
+    {
+     "id": "chang3d1",
+     "uid": "S1",
+     "label": "Replace Hand Weapon",
+     "variant": "replace",
+     "options": [
+      {
+       "uid": "O1",
+       "label": "Great Weapon (A3, AP(2))",
+       "cost": 10,
+       "costs": [
+        {
+         "unitId": "u-hero",
+         "cost": 20
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "uid": "P2",
+   "hint": "Warriors",
+   "sections": [
+    {
+     "id": "chang3d2",
+     "uid": "S2",
+     "label": "Upgrade one model with one",
+     "variant": "upgrade",
+     "options": [
+      {
+       "uid": "O2",
+       "label": "Banner",
+       "cost": 10,
+       "costs": []
+      },
+      {
+       "uid": "O4",
+       "label": "Sergeant",
+       "cost": 5,
+       "costs": []
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "specialRules": [
+  {
+   "id": "r1",
+   "name": "Furious",
+   "description": "When charging, unmodified results of 5-6 to hit deal one extra hit."
+  },
+  {
+   "id": "r2",
+   "name": "Battle Drills",
+   "description": "This model and its unit get Furious."
+  },
+  {
+   "id": "r3",
+   "name": "Elite Corps",
+   "description": "Old Guard may only be taken once per army."
+  }
+ ],
+ "spells": [
+  {
+   "id": "sp1",
+   "name": "Fireball",
+   "threshold": 2,
+   "effect": "Target enemy unit within 12\" takes 3 hits with AP(1)."
+  }
+ ]
+}

@@ -10,7 +10,7 @@ from .config import EMBED_DIM, auth_db_path, db_path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 SCHEMA = f"""
@@ -131,6 +131,45 @@ CREATE TABLE IF NOT EXISTS forge_books (
 CREATE INDEX IF NOT EXISTS idx_forge_changed ON forge_books(last_changed);
 CREATE INDEX IF NOT EXISTS idx_forge_book ON forge_books(uid, game_system);
 CREATE INDEX IF NOT EXISTS idx_forge_local_path ON forge_books(local_path);
+
+-- Append-only version history. The live unit / upgrade tables
+-- only ever hold the current Forge revision; every distinct
+-- revision the sync has seen is kept here (see ``opr_mcp.history``).
+CREATE TABLE IF NOT EXISTS book_snapshots (
+    id                    INTEGER PRIMARY KEY,
+    uid                   TEXT NOT NULL,
+    game_system           INTEGER NOT NULL,
+    name                  TEXT,
+    faction               TEXT,
+    official              INTEGER NOT NULL DEFAULT 1,
+    version_string        TEXT,
+    edited_at             TEXT,
+    upstream_modified_at  TEXT,
+    captured_at           TEXT NOT NULL,
+    content_sha256        TEXT NOT NULL,
+    payload               BLOB NOT NULL,
+    provenance            TEXT NOT NULL,
+    UNIQUE (uid, game_system, content_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_book_snap ON book_snapshots(uid, game_system, captured_at);
+CREATE INDEX IF NOT EXISTS idx_book_snap_name ON book_snapshots(name, game_system);
+
+CREATE TABLE IF NOT EXISTS core_rule_snapshots (
+    id              INTEGER PRIMARY KEY,
+    game_system     INTEGER NOT NULL,
+    edition         TEXT,
+    captured_at     TEXT NOT NULL,
+    content_sha256  TEXT NOT NULL,
+    payload         BLOB NOT NULL,
+    provenance      TEXT NOT NULL,
+    UNIQUE (game_system, content_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_core_snap ON core_rule_snapshots(game_system, captured_at);
+
+CREATE TABLE IF NOT EXISTS history_meta (
+    key    TEXT PRIMARY KEY,
+    value  TEXT
+);
 """
 
 
@@ -326,6 +365,12 @@ def _migrate_forward(conn: sqlite3.Connection, from_version: int) -> None:
         _add_column_if_missing(conn, "forge_books", "modified_at", "TEXT")
         _add_column_if_missing(conn, "forge_books", "detail_synced_at", "TEXT")
         _add_column_if_missing(conn, "forge_books", "detail_modified_at", "TEXT")
+    # 4 -> 5: version-history tables (book_snapshots, core_rule_snapshots,
+    # history_meta). Purely additive — created by SCHEMA. Existing live
+    # books get their first snapshot on the next forge scan (see
+    # ``forge.sync._detail_needs_refresh``).
+    if from_version < 5:
+        pass
 
 
 def _add_column_if_missing(

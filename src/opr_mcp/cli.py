@@ -1,8 +1,10 @@
-"""Typer CLI: `opr-mcp ingest|reingest|list|remove|stats|serve|forge-scan`."""
+"""Typer CLI: `opr-mcp ingest|reingest|list|remove|stats|serve|forge-scan|history`."""
 from __future__ import annotations
 
+import json
 import logging
 import os
+import threading
 from pathlib import Path
 
 import typer
@@ -142,6 +144,10 @@ def serve(
     ``FORGE_SYNC=false``), a background scheduler runs an immediate one-shot
     scan at startup and re-scans every ``FORGE_INTERVAL_SECONDS`` (default 12h),
     syncing structured unit / upgrade JSON from Army Forge.
+
+    With forge sync on and ``HISTORY_SEED`` true (the default), the published
+    version-history bundle (``HISTORY_SEED_URL``) is imported in the
+    background so new installs get versions captured before they existed.
     """
     configure_logging()
     if transport not in {"auto", "stdio", "http"}:
@@ -171,6 +177,7 @@ def serve(
             filters=fcfg.filters(),
             game_systems=allowed,
         ).start()
+        _start_history_seed()
         # Run the retention sweep on its own (typically daily) interval. Tied
         # to forge_sync because it's the forge mirror that grows without
         # bound; manual PDFs are user-managed.
@@ -205,6 +212,28 @@ def serve(
     s.run(transport="streamable-http")
 
 
+def _start_history_seed() -> None:
+    """Import the published history bundle off-thread; never fatal."""
+    from .history import bundle
+    from .history import config as hcfg
+
+    if not hcfg.seed_enabled():
+        return
+    url = hcfg.seed_url()
+
+    def _run() -> None:
+        try:
+            conn = db.open_db()
+            try:
+                bundle.seed_from_url(conn, url)
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — seeding is best-effort
+            log.warning("history: seeding from %s failed", url, exc_info=True)
+
+    threading.Thread(target=_run, name="history-seed", daemon=True).start()
+
+
 @app.command(name="forge-scan")
 def forge_scan(
     no_download: bool = typer.Option(
@@ -235,6 +264,8 @@ def forge_scan(
     typer.echo(
         f"Forge scan: {stats.new} new, "
         f"{stats.unchanged} unchanged, {stats.details_synced} details synced, "
+        f"{stats.snapshots_recorded} new version snapshot(s), "
+        f"{stats.core_rule_snapshots} new core-rules snapshot(s), "
         f"{len(stats.failed)} failed (of {stats.seen} pair(s))."
     )
     if stats.failed:
@@ -286,6 +317,80 @@ def cleanup_cmd(
         for f in stats.failures[:10]:
             typer.echo(f"  ! {f}")
         raise typer.Exit(code=1)
+
+
+history_app = typer.Typer(
+    no_args_is_help=True,
+    help="Version history: export / import seed bundles, list versions, diff.",
+)
+app.add_typer(history_app, name="history")
+
+
+@history_app.command(name="export")
+def history_export(
+    out: Path = typer.Option(..., "--out", help="Bundle path (.ndjson.gz)."),
+    since: str | None = typer.Option(
+        None, "--since", help="Only snapshots captured on/after this ISO date.",
+    ),
+) -> None:
+    """Write every captured snapshot to a gzip-NDJSON seed bundle."""
+    configure_logging()
+    from .history import bundle
+    counts = bundle.export_bundle(db.open_db(), out, since=since)
+    typer.echo(
+        f"Exported {counts['books']} book snapshot(s) and "
+        f"{counts['core_rules']} core-rules snapshot(s) to {out}"
+    )
+
+
+@history_app.command(name="import")
+def history_import(
+    source: str = typer.Argument(..., help="Bundle path or http(s) URL."),
+) -> None:
+    """Import a seed bundle (idempotent; hashes are verified)."""
+    configure_logging()
+    from .history import bundle
+    stats = bundle.import_bundle(db.open_db(), source)
+    typer.echo(
+        f"Imported {stats.books_added} book and {stats.core_added} core-rules "
+        f"snapshot(s); {stats.unchanged} already present; "
+        f"{len(stats.rejected)} rejected."
+    )
+    if stats.rejected:
+        for r in stats.rejected[:10]:
+            typer.echo(f"  ! {r}")
+        raise typer.Exit(code=1)
+
+
+@history_app.command(name="list")
+def history_list(
+    army: str = typer.Argument(..., help="Army name or Forge book uid."),
+    game: str | None = typer.Option(None, "--game", help="Game-system slug, e.g. gf."),
+) -> None:
+    """List captured versions of an army book (JSON)."""
+    from .tools import history as history_tool
+    typer.echo(json.dumps(
+        history_tool.list_versions(db.open_db(), army, game_system=game), indent=2,
+    ))
+
+
+@history_app.command(name="diff")
+def history_diff(
+    army: str = typer.Argument(..., help="Army name or Forge book uid."),
+    game: str = typer.Option(..., "--game", help="Game-system slug, e.g. gf."),
+    from_version: str | None = typer.Option(None, "--from", help="Older ref (default previous)."),
+    to_version: str | None = typer.Option(None, "--to", help="Newer ref (default latest)."),
+    unit: str | None = typer.Option(None, "--unit", help="Unit-name substring."),
+) -> None:
+    """Diff an army book between two versions (JSON)."""
+    from .tools import history as history_tool
+    typer.echo(json.dumps(
+        history_tool.diff_army(
+            db.open_db(), army, game_system=game,
+            from_version=from_version, to_version=to_version, unit=unit,
+        ),
+        indent=2, ensure_ascii=False,
+    ))
 
 
 _DEFAULT_UI_FIXTURES = {

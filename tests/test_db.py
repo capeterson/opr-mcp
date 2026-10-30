@@ -205,3 +205,31 @@ def test_fts_triggers_keep_index_in_sync(tmp_db):
     conn.commit()
     rows = conn.execute("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'brown'").fetchall()
     assert len(rows) == 1
+
+
+def test_v4_db_migrates_in_place_to_v5(tmp_path):
+    """v4 → v5 only adds the version-history tables."""
+    import re
+
+    p = tmp_path / "opr.db"
+    conn = db.connect(p)
+    v4_schema = re.sub(
+        r"CREATE TABLE IF NOT EXISTS (book_snapshots|core_rule_snapshots|history_meta)"
+        r".*?\);\s*(?:CREATE INDEX IF NOT EXISTS idx_(book|core)_snap\w*\s+ON [^;]+;\s*)*",
+        "",
+        db.SCHEMA,
+        flags=re.DOTALL,
+    )
+    assert "book_snapshots" not in v4_schema
+    conn.executescript(v4_schema)
+    conn.execute("INSERT INTO schema_version(version) VALUES (4)")
+    conn.commit()
+    conn.close()
+
+    conn = db.open_db(p)
+    try:
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"book_snapshots", "core_rule_snapshots", "history_meta"} <= tables
+    finally:
+        conn.close()

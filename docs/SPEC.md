@@ -55,3 +55,26 @@ implementation order) are the plan-of-record. See the implementation plan at
 `src/opr_mcp/` which mirrors the spec exactly.
 
 For the full text of those sections, see the build spec that prompted this project.
+
+## Addendum: version history (schema v5)
+
+Army Forge serves only the current revision of each book (no history
+endpoint; version params ignored), so history is captured locally:
+
+- `book_snapshots(uid, game_system, version_string, edited_at,
+  captured_at, content_sha256, payload, provenance)` — one row per
+  distinct normalized book payload (zlib JSON), `UNIQUE(uid,
+  game_system, content_sha256)`.
+- `core_rule_snapshots(game_system, edition, captured_at,
+  content_sha256, payload, provenance)` — `/api/rules/common/{gs}`;
+  `edition` is inferred from the scan's book versions.
+- `history_meta` — seed-bundle ETag / sha bookkeeping.
+
+Normalization drops volatile fields (`upgradePackages[].sections[].id`
+is regenerated per request; `modifiedAt` is re-stamped catalog-wide) and
+presentation-only fields before hashing. Seed bundles are gzip NDJSON
+(`opr-mcp history export/import`), republished weekly as the
+`history-latest` release asset and imported by `serve`. Force-org limits
+are versioned in `src/opr_mcp/rulesets/force_org.json`; hero-attachment
+limits are parsed from the versioned core `Hero` rule.
+

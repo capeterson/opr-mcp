@@ -203,3 +203,19 @@ def fetch_book_detail(uid: str, game_system: int) -> dict:
             f"{type(data).__name__}"
         )
     return data
+
+
+def fetch_common_rules(game_system: int) -> dict:
+    """Fetch the core rules + traits for one game system.
+
+    ``GET /api/rules/common/{gs}`` returns ``{"rules": [...], "traits":
+    [...]}`` for the *current* edition only — there is no version
+    parameter, which is why :mod:`opr_mcp.history` snapshots it.
+    """
+    data = _http_json(f"{API_HOST}/api/rules/common/{game_system}")
+    if not isinstance(data, dict):
+        raise ArmyForgeError(
+            f"Unexpected common-rules payload for gs={game_system}: "
+            f"{type(data).__name__}"
+        )
+    return data
