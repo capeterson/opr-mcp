@@ -31,27 +31,28 @@ function renderSearch(payload) {
     <div class="opr-toolbar">
       <span class="opr-muted">${hits.length} result${hits.length === 1 ? "" : "s"}${payload.query ? ` for "${escapeHtml(payload.query)}"` : ""}</span>
     </div>
-    ${hits.length === 0 ? "<div class=\"opr-empty\">No matches.</div>" : hits.map((h, i) => `
+    ${hits.length === 0 ? "<div class=\"opr-empty\">No matches</div>" : hits.map((h, i) => `
       <div class="opr-card opr-hit" data-idx="${i}">
-        <h3>${escapeHtml(h.section_title || "Untitled section")}
-          ${typeof h.score === "number" ? `<span class="opr-pill">${scorePct(h.score)}</span>` : ""}
-        </h3>
-        <div class="opr-muted">${sourceLine(h.source)}</div>
+        <div class="opr-card-head">
+          <h3>${escapeHtml(h.section_title || "Untitled section")}</h3>
+          ${typeof h.score === "number" ? `<span class="opr-pill opr-pill-accent">${scorePct(h.score)}</span>` : ""}
+        </div>
+        <div class="opr-cite">${sourceLine(h.source)}</div>
         <div class="opr-hit-body">${escapeHtml(h.text)}</div>
-        <div style="margin-top:6px">
-          <button class="opr-btn opr-cite" data-idx="${i}">Cite this</button>
+        <div class="opr-hit-actions">
+          <button class="opr-btn opr-cite-btn" data-idx="${i}">Cite this</button>
         </div>
       </div>`).join("")}
   `;
 
   viewEl.querySelectorAll(".opr-hit").forEach((card) => {
     card.addEventListener("click", (ev) => {
-      if (ev.target.closest(".opr-cite")) return;
+      if (ev.target.closest(".opr-cite-btn")) return;
       card.classList.toggle("opr-expanded");
     });
   });
 
-  viewEl.querySelectorAll(".opr-cite").forEach((btn) => {
+  viewEl.querySelectorAll(".opr-cite-btn").forEach((btn) => {
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       const hit = hits[Number(btn.dataset.idx)];
@@ -73,18 +74,21 @@ function renderSearch(payload) {
 function renderRule(payload) {
   const rule = payload.rule;
   if (!rule) {
-    viewEl.innerHTML = `<div class="opr-empty">No rule named "${escapeHtml(payload.name || "")}" found.</div>`;
+    viewEl.innerHTML = `<div class="opr-empty">No rule named "${escapeHtml(payload.name || "")}" found</div>`;
     return;
   }
   const src = rule.source || {};
   viewEl.innerHTML = `
     <div class="opr-card">
-      <h3>${escapeHtml(rule.name)}
-        ${rule.parametric ? '<span class="opr-pill">parametric</span>' : ""}
-        ${rule.scope ? `<span class="opr-pill">${escapeHtml(rule.scope)}</span>` : ""}
-      </h3>
+      <div class="opr-card-head">
+        <h3>${escapeHtml(rule.name)}</h3>
+        <span>
+          ${rule.parametric ? '<span class="opr-pill opr-pill-accent">parametric</span>' : ""}
+          ${rule.scope ? `<span class="opr-pill">${escapeHtml(rule.scope)}</span>` : ""}
+        </span>
+      </div>
       <div style="white-space:pre-wrap">${escapeHtml(rule.description || "")}</div>
-      <div class="opr-muted" style="margin-top:8px">${escapeHtml(src.filename || "")}${src.page ? ` · p.${src.page}` : ""}${src.version ? ` · v${src.version}` : ""}</div>
+      <div class="opr-cite opr-card-section">${escapeHtml(src.filename || "")}${src.page ? ` · p.${src.page}` : ""}${src.version ? ` · v${src.version}` : ""}</div>
     </div>
   `;
 }

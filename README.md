@@ -246,6 +246,14 @@ the file in a browser — it stubs out server-tool calls and feeds the view a
 JSON fixture (defaults to one under `tests/fixtures/ui/`, or pass `--fixture`)
 as if a host had just delivered a tool result.
 
+The views share one stylesheet, `src/opr_mcp/ui/assets/base.css`, which
+implements the OPR Codex design system: dense, dark-first and loosely
+grimdark. A dark host theme gets the Void palette and a light one gets
+Parchment. The views don't use the host's colors or fonts. They also load
+nothing remote, so the Cinzel and IBM Plex faces only render where they're
+installed locally; otherwise the font stacks fall back to Georgia, Arial
+Narrow and Consolas.
+
 ## Configuration
 
 All configuration is via environment variables. See [`.env.example`](.env.example)

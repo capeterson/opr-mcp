@@ -26,6 +26,12 @@ function fmtPts(n) {
   return n === null || n === undefined ? "—" : `${n}`;
 }
 
+// Upgrade costs read as deltas: "+15pts", "-5pts", "+0pts".
+function fmtCost(n) {
+  if (n === null || n === undefined) return "—";
+  return `${n >= 0 ? "+" : ""}${n}pts`;
+}
+
 function fmtStat(n) {
   return n === null || n === undefined ? "—" : String(n);
 }
@@ -49,17 +55,18 @@ function renderArmies(payload) {
     : "";
 
   viewEl.innerHTML = `
+    <h2 class="opr-title"><span class="opr-sigil">✠</span>Armies</h2>
     <div class="opr-toolbar">${toggle}<span class="opr-muted">${rows.length} armies</span></div>
-    ${rows.length === 0 ? "<div class=\"opr-empty\">No armies indexed yet.</div>" : `
+    ${rows.length === 0 ? "<div class=\"opr-empty\">No armies indexed yet</div>" : `
     <table class="opr-table">
-      <thead><tr><th>Army</th><th>System</th><th>Units</th><th>Docs</th></tr></thead>
+      <thead><tr><th>Army</th><th>System</th><th class="opr-num">Units</th><th class="opr-num">Docs</th></tr></thead>
       <tbody>
         ${rows.map((a, i) => `
           <tr data-idx="${i}">
             <td>${escapeHtml(a.army)}</td>
             <td><span class="opr-pill">${escapeHtml(a.game_system || "—")}</span></td>
-            <td>${fmtStat(a.unit_count)}</td>
-            <td>${fmtStat(a.document_count)}</td>
+            <td class="opr-num">${fmtStat(a.unit_count)}</td>
+            <td class="opr-num">${fmtStat(a.document_count)}</td>
           </tr>`).join("")}
       </tbody>
     </table>`}
@@ -92,8 +99,8 @@ function renderArmies(payload) {
 
 const UNIT_COLUMNS = [
   { key: "name", label: "Name" },
-  { key: "base_points", label: "Points" },
-  { key: "qty", label: "Qty" },
+  { key: "base_points", label: "Points", num: true },
+  { key: "qty", label: "Qty", num: true },
   { key: "quality", label: "Quality" },
   { key: "defense", label: "Defense" },
 ];
@@ -115,18 +122,23 @@ function renderUnits(payload) {
   viewEl.innerHTML = `
     <div class="opr-breadcrumbs">
       <button id="opr-back-armies">Armies</button> ›
-      <span>${escapeHtml(payload.army)}</span>
+      <span class="opr-current">${escapeHtml(payload.army)}</span>
       ${payload.game_system ? `<span class="opr-pill">${escapeHtml(payload.game_system)}</span>` : ""}
     </div>
-    ${units.length === 0 ? "<div class=\"opr-empty\">No units found.</div>" : `
+    <h2 class="opr-title"><span class="opr-sigil">✠</span>${escapeHtml(payload.army)}</h2>
+    ${units.length === 0 ? "<div class=\"opr-empty\">No units found</div>" : `
     <table class="opr-table">
-      <thead><tr>${UNIT_COLUMNS.map((c) => `<th data-key="${c.key}">${c.label}${sortKey === c.key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}</th>`).join("")}</tr></thead>
+      <thead><tr>${UNIT_COLUMNS.map((c) => {
+        const sorted = sortKey === c.key;
+        const attrs = `${c.num ? ' class="opr-num"' : ""}${sorted ? ` aria-sort="${sortDir === "asc" ? "ascending" : "descending"}"` : ""}`;
+        return `<th data-key="${c.key}"${attrs}>${c.label}${sorted ? (sortDir === "asc" ? " ↑" : " ↓") : ""}</th>`;
+      }).join("")}</tr></thead>
       <tbody>
         ${units.map((u, i) => `
           <tr data-idx="${i}">
             <td>${escapeHtml(u.name)}</td>
-            <td>${fmtPts(u.base_points)}</td>
-            <td>${fmtStat(u.qty)}</td>
+            <td class="opr-num">${fmtPts(u.base_points)}</td>
+            <td class="opr-num">${fmtStat(u.qty)}</td>
             <td>${escapeHtml(u.quality ?? "—")}</td>
             <td>${escapeHtml(u.defense ?? "—")}</td>
           </tr>`).join("")}
@@ -174,7 +186,7 @@ function renderUpgradeGroups(groups) {
       ${(g.options || []).map((o) => `
         <div class="opr-upgrade-option">
           <span>${escapeHtml(o.text)}</span>
-          <span class="opr-muted">${fmtPts(o.points_cost)} pts</span>
+          <span class="opr-pts">${fmtCost(o.points_cost)}</span>
         </div>`).join("")}
     </div>`).join("");
 }
@@ -182,8 +194,8 @@ function renderUpgradeGroups(groups) {
 function renderRules(rules) {
   if (!rules || rules.length === 0) return "<span class=\"opr-muted\">None</span>";
   return rules.map((r) => {
-    if (typeof r === "string") return `<span class="opr-pill">${escapeHtml(r)}</span>`;
-    return `<span class="opr-pill" title="${escapeHtml(r.description || "")}">${escapeHtml(r.name)}</span>`;
+    if (typeof r === "string") return `<span class="opr-pill opr-pill-rule">${escapeHtml(r)}</span>`;
+    return `<span class="opr-pill opr-pill-rule" title="${escapeHtml(r.description || "")}">${escapeHtml(r.name)}</span>`;
   }).join(" ");
 }
 
@@ -194,17 +206,17 @@ function unitCard(u) {
     .join(" ") || "<span class=\"opr-muted\">None</span>";
   return `
     <div class="opr-card">
-      <h3>${escapeHtml(u.name)}</h3>
+      <div class="opr-card-head"><h3>${escapeHtml(u.name)}</h3></div>
       <div class="opr-stat-row">
-        <div class="opr-stat"><span class="opr-stat-label">Points</span>${fmtPts(u.base_points)}</div>
-        <div class="opr-stat"><span class="opr-stat-label">Qty</span>${fmtStat(u.qty)}</div>
-        <div class="opr-stat"><span class="opr-stat-label">Quality</span>${escapeHtml(u.quality ?? "—")}</div>
-        <div class="opr-stat"><span class="opr-stat-label">Defense</span>${escapeHtml(u.defense ?? "—")}</div>
+        <div class="opr-stat"><span class="opr-stat-label">Points</span><span class="opr-stat-value">${fmtPts(u.base_points)}</span></div>
+        <div class="opr-stat"><span class="opr-stat-label">Qty</span><span class="opr-stat-value">${fmtStat(u.qty)}</span></div>
+        <div class="opr-stat"><span class="opr-stat-label">Quality</span><span class="opr-stat-value">${escapeHtml(u.quality ?? "—")}</span></div>
+        <div class="opr-stat"><span class="opr-stat-label">Defense</span><span class="opr-stat-value">${escapeHtml(u.defense ?? "—")}</span></div>
       </div>
-      <div><span class="opr-stat-label">Equipment</span><div>${equipment}</div></div>
-      <div style="margin-top:6px"><span class="opr-stat-label">Rules</span><div>${renderRules(u.rules)}</div></div>
+      <div class="opr-card-section"><span class="opr-label">Equipment</span><div>${equipment}</div></div>
+      <div class="opr-card-section"><span class="opr-label">Rules</span><div>${renderRules(u.rules)}</div></div>
       ${renderUpgradeGroups(u.upgrade_groups)}
-      <div class="opr-muted" style="margin-top:8px">${escapeHtml(src.filename || "")}${src.page ? ` · p.${src.page}` : ""}${src.version ? ` · v${src.version}` : ""}</div>
+      <div class="opr-cite opr-card-section">${escapeHtml(src.filename || "")}${src.page ? ` · p.${src.page}` : ""}${src.version ? ` · v${src.version}` : ""}</div>
     </div>`;
 }
 
@@ -213,10 +225,10 @@ function renderUnit(payload) {
   viewEl.innerHTML = `
     <div class="opr-breadcrumbs">
       <button id="opr-back-armies">Armies</button> ›
-      <button id="opr-back-units">${escapeHtml(state.unitsPayload?.army || "")}</button> ›
-      <span>${escapeHtml(units[0]?.name || "")}</span>
+      ${state.unitsPayload?.army ? `<button id="opr-back-units">${escapeHtml(state.unitsPayload.army)}</button> ›` : ""}
+      <span class="opr-current">${escapeHtml(units[0]?.name || "")}</span>
     </div>
-    ${units.length === 0 ? "<div class=\"opr-empty\">Unit not found.</div>" : units.map(unitCard).join("")}
+    ${units.length === 0 ? "<div class=\"opr-empty\">Unit not found</div>" : units.map(unitCard).join("")}
   `;
   viewEl.querySelector("#opr-back-armies").addEventListener("click", () => {
     if (state.armiesPayload) renderArmies(state.armiesPayload);
