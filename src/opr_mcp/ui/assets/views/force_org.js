@@ -25,10 +25,11 @@ const LIMIT_FORMULAS = [
 
 function render(gamePts) {
   viewEl.innerHTML = `
+    <h2 class="opr-title"><span class="opr-sigil">✠</span>Force Organization</h2>
     <div class="opr-slider-row">
-      <label for="opr-pts">Game size</label>
+      <label class="opr-label" for="opr-pts">Game size</label>
       <input type="range" id="opr-pts" min="${MIN_PTS}" max="${MAX_PTS}" step="${STEP_PTS}" value="${gamePts}" />
-      <strong id="opr-pts-value">${gamePts} pts</strong>
+      <strong class="opr-stat-value" id="opr-pts-value">${gamePts} pts</strong>
     </div>
     <div class="opr-limits-grid">
       ${LIMIT_FORMULAS.map((l) => `
@@ -38,7 +39,7 @@ function render(gamePts) {
           <div class="opr-limit-formula">${l.formula}</div>
         </div>`).join("")}
     </div>
-    <p class="opr-muted" style="margin-top:14px">
+    <p class="opr-muted" style="margin-top:var(--space-5)">
       Verified for AoF and Grimdark Future only. Duplicates: combined units count
       as one. Unit cost cap: an attached hero + unit counts as one unit.
       Call <code>validate_army_list</code> to check an actual roster against

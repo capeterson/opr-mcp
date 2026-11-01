@@ -32,7 +32,10 @@ function escapeHtml(value) {
 }
 
 /** Apply the host's theme/styles/fonts to this document. Called once
- * after connect and again on every `onhostcontextchanged`. */
+ * after connect and again on every `onhostcontextchanged`. Only the
+ * theme has a visible effect: base.css maps data-theme="dark"/"light"
+ * to the OPR Codex Void/Parchment palettes and deliberately reads none
+ * of the host's style variables or fonts. */
 function applyHostContext(ctx) {
   if (!ctx) return;
   if (ctx.theme) applyDocumentTheme(ctx.theme);
